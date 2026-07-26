@@ -17,7 +17,7 @@ release links to reproducible QA evidence and identifies the exact executable.
 - Mandatory short/long playback, malformed-input, high-DPI, association, and
   visual release-evidence gate.
 - Versioned local package and GitHub publication contract.
-- Embedded Windows file/product version and reproducible-link release build.
+- Embedded Windows file/product version and versioned CI release build.
 - Premium icon-led Command Center foundation with persistent working playback,
   audio, visual, interface, and trust preferences.
 
