@@ -42,7 +42,8 @@ Primary references:
 | Codec/input tuning | Decoder resource profile and diagnostics | **PLANNED** |
 | Bounded preflight and offline decode | Cannot be disabled by presentation UI | **LOCKED** |
 | Privacy and telemetry | No runtime network or telemetry | **LOCKED** |
-| Settings search and keyboard navigation | Command palette index | **IN PROGRESS** |
+| Settings search and keyboard navigation | Live cross-category index, type-to-search, Tab/arrows/Enter/Escape | **WORKING** |
+| Full capability category map | Playback, Audio, Visuals, Video, Subtitles, Library, Interface, Performance, Privacy, Hotkeys, Advanced | **WORKING** |
 
 The map grows only when a feature has a real owner and release gate. The UI
 does not advertise a checkbox that silently does nothing.

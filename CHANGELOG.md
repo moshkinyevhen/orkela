@@ -24,11 +24,14 @@ release links to reproducible QA evidence and identifies the exact executable.
 - Embedded Windows file/product version and versioned CI release build.
 - Premium icon-led Command Center foundation with persistent working playback,
   audio, visual, interface, and trust preferences.
+- Instant cross-category setting search, twelve-area capability navigation,
+  and keyboard-only focus and activation.
 
 ### Fixed
 
 - Long `.resonith` files no longer block the Windows message loop while the
   native decoder prepares playback PCM.
+- Skip glyphs now point in their actual transport direction.
 
 ### Compatibility
 

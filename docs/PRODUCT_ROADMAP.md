@@ -4,7 +4,8 @@ Status: **ACCEPTED**
 
 ## O-2 — Premium Command Center
 
-Status: **IN PROGRESS / RELEASE-BLOCKING FOR 0.2.0-alpha.2**
+Status: **IMPLEMENTED / FINAL QA IN PROGRESS / RELEASE-BLOCKING FOR
+0.2.0-alpha.2**
 
 ### Goal
 
@@ -35,18 +36,21 @@ The milestone requires:
 
 Complete the Command Center before any additional codec-facing player work:
 
-1. finish the premium icon-led shell, transitions, focus states, and compact
-   quick controls;
-2. add global setting search and complete keyboard-only navigation;
-3. expose the full category map: Playback, Audio, Video, Subtitles, Library,
-   Interface, Performance, Privacy, Hotkeys, and Advanced;
-4. connect every currently available preference to real persisted behavior;
-5. mark unavailable capabilities visibly as `PLANNED`, `RESEARCH`, or
-   `PENDING CORE` instead of presenting inert controls;
-6. compare capability coverage against the documented VLC preference and
-   playback-control surface, then preserve only settings that are meaningful
-   to Orkela's architecture;
-7. pass the complete O-2 release gate before tagging `0.2.0-alpha.2`.
+- [x] finish the premium icon-led shell, focus states, and compact quick
+  controls;
+- [x] add global setting search and complete keyboard-only navigation;
+- [x] expose the full category map: Playback, Audio, Video, Subtitles,
+  Library, Interface, Performance, Privacy, Hotkeys, and Advanced;
+- [x] connect every currently available preference to real persisted
+  behavior;
+- [x] mark unavailable capabilities visibly as `PLANNED`, `RESEARCH`, or
+  `PENDING CORE` instead of presenting inert controls;
+- [x] compare capability coverage against the documented VLC preference and
+  playback-control surface, then preserve only settings that are meaningful
+  to Orkela's architecture;
+- [ ] pass the remaining 100%, 150%, constrained-layout, reduced-motion,
+  malformed-input, and complete O-2 release gates before tagging
+  `0.2.0-alpha.2`.
 
 ### Release gate
 
