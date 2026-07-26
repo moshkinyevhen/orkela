@@ -125,7 +125,10 @@ jobs:
           ).stdout.strip()
 
           best = None
-          for step in range(1080, 1261):
+          # Opus true VBR may deliberately overshoot its nominal target on a
+          # short tonal excerpt. Match the complete container bytes instead of
+          # assuming that the requested bitrate predicts the final file size.
+          for step in range(800, 1081):
               bitrate = step / 10.0
               candidate = candidates / f"{step}.opus"
               subprocess.run(
