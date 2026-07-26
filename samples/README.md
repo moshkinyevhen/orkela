@@ -5,6 +5,9 @@ by the prospective Resonith LPS5 transport. Orkela opens this file directly,
 decodes it through Resonith Core, and sends the resulting PCM16 to the Windows
 audio device. No WAV conversion or external decoder is used.
 
+`emotional-piano-original.wav` is the exact PCM16 input used for that
+bitstream and for the rate-matched Opus comparison.
+
 ## Bitstream
 
 - bytes: `117643`
@@ -30,3 +33,6 @@ audio device. No WAV conversion or external decoder is used.
   `9661f81d37c59f230b324b830ab68c0482336af3ec117c92e73108ffb4095f15`
 - selected source PCM16 SHA-256:
   `3481c6d893ff9b41a15862e042de56a2f13ac54ee2d230eff8a44123c640405e`
+- selected WAV bytes: `1411244`
+- selected WAV SHA-256:
+  `37d28f15c8b3ecb13c2c161049c39d5de18f0c1b7e5f4a832684dd8059afdab5`

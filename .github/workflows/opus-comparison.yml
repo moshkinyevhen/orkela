@@ -1,0 +1,212 @@
+name: Current Opus comparison
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/opus-comparison.yml
+      - samples/emotional-piano-original.wav
+      - samples/emotional-piano-resonith.lps5
+
+permissions:
+  contents: read
+
+jobs:
+  encode:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            autoconf automake build-essential libogg-dev libtool pkg-config
+
+      - name: Build official Opus 1.6.1 encoder stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/opus-source"
+          prefix="$RUNNER_TEMP/opus-prefix"
+          mkdir -p "$source_dir" "$prefix"
+          cd "$source_dir"
+
+          curl --fail --location --retry 3 \
+            --output opus-1.6.1.tar.gz \
+            https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          echo \
+            "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1  opus-1.6.1.tar.gz" \
+            | sha256sum --check
+
+          curl --fail --location --retry 3 \
+            --output libopusenc-0.3.tar.gz \
+            https://downloads.xiph.org/releases/opus/libopusenc-0.3.tar.gz
+          echo \
+            "f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c  libopusenc-0.3.tar.gz" \
+            | sha256sum --check
+
+          curl --fail --location --retry 3 \
+            --output opusfile-0.12.tar.gz \
+            https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz
+          echo \
+            "118d8601c12dd6a44f52423e68ca9083cc9f2bfe72da7a8c1acb22a80ae3550b  opusfile-0.12.tar.gz" \
+            | sha256sum --check
+
+          curl --fail --location --retry 3 \
+            --output opus-tools-0.2.tar.gz \
+            https://downloads.xiph.org/releases/opus/opus-tools-0.2.tar.gz
+          echo \
+            "b4e56cb00d3e509acfba9a9b627ffd8273b876b4e2408642259f6da28fa0ff86  opus-tools-0.2.tar.gz" \
+            | sha256sum --check
+
+          tar -xf opus-1.6.1.tar.gz
+          tar -xf libopusenc-0.3.tar.gz
+          tar -xf opusfile-0.12.tar.gz
+          tar -xf opus-tools-0.2.tar.gz
+
+          cd "$source_dir/opus-1.6.1"
+          ./configure --prefix="$prefix" --disable-shared --enable-static
+          make --jobs=2
+          make install
+
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+          export CPPFLAGS="-I$prefix/include"
+          export LDFLAGS="-L$prefix/lib"
+
+          cd "$source_dir/libopusenc-0.3"
+          ./configure --prefix="$prefix" --disable-shared --enable-static
+          make --jobs=2
+          make install
+
+          cd "$source_dir/opusfile-0.12"
+          ./configure \
+            --prefix="$prefix" \
+            --disable-shared \
+            --enable-static \
+            --disable-http
+          make --jobs=2
+          make install
+
+          cd "$source_dir/opus-tools-0.2"
+          ./configure --prefix="$prefix"
+          make --jobs=2
+
+          echo "OPUSENC=$source_dir/opus-tools-0.2/opusenc" \
+            >> "$GITHUB_ENV"
+          "$source_dir/opus-tools-0.2/opusenc" --version
+
+      - name: Match complete Opus bytes to Resonith
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          root = Path.cwd()
+          output = root / "comparison"
+          candidates = output / "candidates"
+          candidates.mkdir(parents=True)
+          source = root / "samples" / "emotional-piano-original.wav"
+          resonith = (
+              root / "samples" / "emotional-piano-resonith.lps5"
+          )
+          target_bytes = resonith.stat().st_size
+          encoder = Path(os.environ["OPUSENC"])
+          version = subprocess.run(
+              [str(encoder), "--version"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.strip()
+
+          best = None
+          for step in range(1080, 1261):
+              bitrate = step / 10.0
+              candidate = candidates / f"{step}.opus"
+              subprocess.run(
+                  [
+                      str(encoder),
+                      "--quiet",
+                      "--music",
+                      "--vbr",
+                      "--comp",
+                      "10",
+                      "--framesize",
+                      "20",
+                      "--expect-loss",
+                      "0",
+                      "--max-delay",
+                      "1000",
+                      "--padding",
+                      "0",
+                      "--discard-comments",
+                      "--serial",
+                      "1",
+                      "--bitrate",
+                      f"{bitrate:.1f}",
+                      str(source),
+                      str(candidate),
+                  ],
+                  check=True,
+              )
+              size = candidate.stat().st_size
+              score = (abs(size - target_bytes), size > target_bytes, step)
+              if best is None or score < best[0]:
+                  best = (score, bitrate, candidate, size)
+
+          assert best is not None
+          _, bitrate, candidate, opus_bytes = best
+          final = output / "emotional-piano-opus-1.6.1.opus"
+          shutil.copyfile(candidate, final)
+
+          def sha256(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          report = {
+              "schema": "orkela-rate-matched-comparison-1",
+              "source": {
+                  "path": source.name,
+                  "bytes": source.stat().st_size,
+                  "sha256": sha256(source),
+                  "sample_rate": 44100,
+                  "channels": 2,
+                  "seconds": 8.0,
+              },
+              "resonith": {
+                  "path": resonith.name,
+                  "format": "prospective LPS5",
+                  "bytes": target_bytes,
+                  "sha256": sha256(resonith),
+              },
+              "opus": {
+                  "path": final.name,
+                  "encoder": version,
+                  "mode": "music VBR",
+                  "complexity": 10,
+                  "frame_milliseconds": 20,
+                  "expected_packet_loss_percent": 0,
+                  "requested_bitrate_kbps": bitrate,
+                  "bytes": opus_bytes,
+                  "complete_byte_delta_from_resonith": (
+                      opus_bytes - target_bytes
+                  ),
+                  "sha256": sha256(final),
+              },
+          }
+          (output / "comparison.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(report, indent=2, sort_keys=True))
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: current-opus-comparison
+          path: |
+            comparison/emotional-piano-opus-1.6.1.opus
+            comparison/comparison.json
+          if-no-files-found: error
