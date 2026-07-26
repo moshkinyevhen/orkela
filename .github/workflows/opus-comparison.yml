@@ -21,7 +21,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            autoconf automake build-essential libogg-dev libtool pkg-config
+            autoconf automake build-essential libflac-dev libogg-dev \
+            libtool pkg-config
 
       - name: Build official Opus 1.6.1 encoder stack
         shell: bash
