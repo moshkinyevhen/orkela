@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Publish only commits explicitly created by the developer. This hook never
+# stages files and never creates commits.
+remote="${ORKELA_SYNC_REMOTE:-origin}"
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || exit 0
+
+if ! git remote get-url "$remote" >/dev/null 2>&1; then
+    exit 0
+fi
+
+echo "Auto-sync: pushing $branch to $remote..."
+git push "$remote" "$branch"
