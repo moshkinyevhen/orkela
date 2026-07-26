@@ -22,6 +22,26 @@ bitstream and for the rate-matched Opus comparison.
 - decoded PCM16 SHA-256:
   `3cfcae4996a08976f42ec83744ea0130935ca53d83b37129c001581697618618`
 
+## Rate-matched Opus anchor
+
+The public comparison uses the official libopus `1.6.1` library through
+`opusenc` from opus-tools `0.2`. The workflow tests candidate true-VBR rates
+and selects the complete Ogg Opus file closest to the Resonith file size.
+
+- complete Opus bytes: `117091`
+- complete byte delta from Resonith: `-552` (`-0.47%`)
+- requested bitrate: `93.9 kb/s`
+- mode: music true VBR
+- encoder complexity: `10`
+- frame duration: `20 ms`
+- expected packet loss: `0%`
+- SHA-256:
+  `1a6889a2f671cd4901e8081c171c22b28ca34f67c13bf6beab48157174fd2d10`
+- reproducible workflow:
+  [opus-comparison.yml](../.github/workflows/opus-comparison.yml)
+- successful run:
+  <https://github.com/moshkinyevhen/orkela/actions/runs/30219306914>
+
 ## Source and license
 
 - title: *Emotional piano*
