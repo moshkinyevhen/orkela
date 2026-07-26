@@ -12,13 +12,31 @@ jobs:
   build:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S . -B build -A x64
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        shell: pwsh
+        run: |
+          $output = & cmake --build build --config Release --parallel 2>&1 |
+            Tee-Object -Variable captured
+          $status = $LASTEXITCODE
+          foreach ($line in $captured) {
+            $text = "$line"
+            if (
+              $text -match '^(.*)\((\d+)(?:,\d+)?\): (error [A-Z]+\d+: .*)$'
+            ) {
+              $path = $matches[1] -replace '\\', '/'
+              Write-Output "::error file=$path,line=$($matches[2])::$($matches[3])"
+            } elseif ($text -match '^LINK : (fatal error .*)$') {
+              Write-Output "::error title=Linker::$($matches[1])"
+            }
+          }
+          if ($status -ne 0) {
+            exit $status
+          }
 
       - name: Package
         shell: pwsh
