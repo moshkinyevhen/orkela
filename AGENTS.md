@@ -2,9 +2,11 @@
 
 ## Product scope
 
-**Orkela** is a standalone media player. Its first milestone is a small native
-Windows application that plays real Resonith LPS5 files through Resonith Core.
-It must never disguise WAV export or an external transcoder as native playback.
+**Orkela** is a standalone media player, pronounced `or-ke-la`. Its canonical
+synchronized-package extension is `.orka`. It directly plays `.resonith`
+through Resonith Core and will play `.scenelith` through SceneLith Core when
+that decoder exists. It must never disguise WAV export or an external
+transcoder as native codec playback.
 
 Orkela is a separate product and repository from the Resonith audio codec and
 the SceneLith video codec. Decoder behavior remains normative in the codec
@@ -21,6 +23,8 @@ repositories; Orkela consumes their public APIs.
 - Audio callbacks must not allocate, lock, log, or perform file I/O.
 - Public code, comments, documentation, commits, and repository metadata are
   English only.
+- `.resonith`, `.scenelith`, and `.orka` are canonical public extensions.
+  `.lps4` and `.lps5` are accepted only as research compatibility inputs.
 
 ## Source-comment contract
 

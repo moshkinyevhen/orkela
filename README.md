@@ -1,11 +1,10 @@
 # Orkela
 
-Orkela is a small native media player for the SceneLith ecosystem. The first
-research release plays real **Resonith LPS5** audio files on Windows by calling
-the public Resonith Core decoder and sending the reconstructed PCM directly to
-the Windows audio device.
+Orkela is a native media player for the SceneLith ecosystem. It plays real
+**Resonith** audio on Windows by calling the public Resonith Core decoder and
+sending reconstructed PCM directly to the Windows audio device.
 
-`LPS5 file -> Resonith Core -> PCM16 -> Windows audio`
+`.resonith file -> Resonith Core -> PCM16 -> Windows audio`
 
 There is no WAV conversion in this path.
 
@@ -15,12 +14,25 @@ There is no WAV conversion in this path.
 musical syllable *la*: the player will ultimately orchestrate independent
 Resonith audio, SceneLith video, subtitles, and the optional AV bridge.
 
-The name is a working product decision pending formal trademark clearance.
+The product name and international pronunciation are accepted project
+decisions pending formal trademark clearance.
+
+## Canonical media names
+
+- `.resonith` — standalone Resonith audio;
+- `.scenelith` — standalone SceneLith visual bitstream;
+- `.orka` — synchronized package binding independent audio and visual streams
+  through the separate SceneLith AV Bridge.
+
+Research `.lps4` and `.lps5` inputs remain readable during development but are
+not stable user-facing extensions. Orkela recognizes `.scenelith` now and will
+decode it when a conforming SceneLith Core exists; the player never simulates
+an unavailable decoder.
 
 ## Current milestone
 
 - native C++20 and Win32;
-- Open, Play, Stop, and file drag-and-drop;
+- open, play, stop, and file drag-and-drop;
 - direct LPS4/LPS5 preflight and decoding through Resonith Core;
 - mono and stereo PCM16 output through the Windows multimedia device;
 - no runtime network access and no external codec process.
