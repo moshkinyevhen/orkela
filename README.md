@@ -44,6 +44,10 @@ cmake --build build --config Release
 
 The executable is `build/Release/Orkela.exe`.
 
+Open `samples/emotional-piano-resonith.lps5` and press **Play** for a native
+end-to-end demonstration. The sample is a real LPS5 bitstream, not PCM with a
+renamed extension; its provenance and hashes are recorded beside the file.
+
 To build against a local Resonith checkout:
 
 ```powershell
