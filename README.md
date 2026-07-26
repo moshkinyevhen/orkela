@@ -4,6 +4,8 @@ Orkela is a native media player for the SceneLith ecosystem. It plays real
 **Resonith** audio on Windows by calling the public Resonith Core decoder and
 sending reconstructed PCM directly to the Windows audio device.
 
+Current version: **0.2.0-alpha.2**.
+
 `.resonith file -> Resonith Core -> PCM16 -> Windows audio`
 
 There is no WAV conversion in this path.
@@ -43,6 +45,19 @@ an unavailable decoder.
 This milestone decodes a complete research clip into bounded application
 memory before playback. Streaming decode, playlists, mobile front ends, and
 SceneLith video are subsequent milestones.
+
+## Release evidence
+
+Every playback or interface release is tested with the pinned short
+LibriSpeech and full-length Mozart `.resonith` files. The gate covers
+responsive background validation/decode, actual playback, play/pause/stop,
+seeking, timeline and spectrum motion, volume, malformed-input rejection, file
+associations, high DPI, and constrained monitor work areas.
+
+Each published improvement updates [`CHANGELOG.md`](CHANGELOG.md) and
+[`VERSION`](VERSION). The local package and GitHub release must identify the
+same semantic version, source commit, filenames, and SHA-256 hashes. See
+[Release Evidence Protocol](docs/RELEASE_EVIDENCE.md).
 
 ## Build
 

@@ -43,4 +43,11 @@ Before publishing a change:
 3. verify playback reads LPS5 directly and creates no WAV;
 4. verify malformed input fails before playback;
 5. verify no Cyrillic text is tracked;
-6. verify the repository contains no secrets or machine-specific paths.
+6. verify the repository contains no secrets or machine-specific paths;
+7. verify the pinned short LibriSpeech and full-length Mozart `.resonith`
+   files, including responsive background decode, playback, seeking, timeline,
+   spectrum, and high-DPI rendering;
+8. publish the QA report with the exact Orkela version, commit, executable
+   hash, input hashes, and pass/fail result;
+9. update `VERSION` and the English `CHANGELOG.md`; local artifacts and the
+   corresponding GitHub release must carry matching versions and hashes.
