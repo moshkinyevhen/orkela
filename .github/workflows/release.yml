@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "orkela-ci-*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $package = "Orkela-Windows-x64-$version"
+          New-Item -ItemType Directory -Path "out/$package"
+          Copy-Item build/Release/Orkela.exe "out/$package/Orkela.exe"
+          Copy-Item tools/Register-Orkela.ps1 "out/$package/Register-Orkela.ps1"
+          Copy-Item README.md,CHANGELOG.md,VERSION "out/$package/"
+          Copy-Item samples "out/$package/samples" -Recurse
+          Compress-Archive `
+            -Path "out/$package/*" `
+            -DestinationPath "out/$package.zip" `
+            -CompressionLevel Optimal
+          Get-FileHash "out/$package/Orkela.exe","out/$package.zip" `
+            -Algorithm SHA256 |
+            ForEach-Object {
+              "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))"
+            } |
+            Set-Content "out/$package-SHA256SUMS.txt" -Encoding ascii
+
+      - name: Publish validation or versioned prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $package = "Orkela-Windows-x64-$version"
+          $validation = "${{ startsWith(github.ref_name, 'orkela-ci-') }}"
+          if ($validation -eq "true") {
+            $title = "Orkela CI validation ${{ github.sha }}"
+            $notes = @"
+          Automated validation build. This is not a versioned product release.
+
+          Source commit: `${{ github.sha }}`
+          Declared candidate version: `$version`
+          "@
+          } else {
+            if ("v$version" -ne "${{ github.ref_name }}") {
+              throw "Tag ${{ github.ref_name }} does not match VERSION $version"
+            }
+            $title = "Orkela $version"
+            $notes = @"
+          Native Windows x64 prerelease of Orkela.
+
+          Source commit: `${{ github.sha }}`
+          See `CHANGELOG.md` and the versioned release-evidence report.
+          "@
+          }
+          gh release create "${{ github.ref_name }}" `
+            "out/$package/Orkela.exe" `
+            "out/$package.zip" `
+            "out/$package-SHA256SUMS.txt" `
+            --title $title `
+            --notes $notes `
+            --prerelease

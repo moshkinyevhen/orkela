@@ -36,6 +36,8 @@ if(NOT WIN32)
 endif()
 
 add_executable(Orkela WIN32
+    src/app_preferences.cpp
+    src/app_preferences.h
     src/main.cpp
     src/resonith_file.cpp
     src/resonith_file.h
@@ -72,6 +74,7 @@ set_target_properties(Orkela PROPERTIES CXX_EXTENSIONS OFF)
 
 if(MSVC)
     target_compile_options(Orkela PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(Orkela PRIVATE /Brepro)
     if(ORKELA_WARNINGS_AS_ERRORS)
         target_compile_options(Orkela PRIVATE /WX)
     endif()

@@ -59,6 +59,13 @@ Each published improvement updates [`CHANGELOG.md`](CHANGELOG.md) and
 same semantic version, source commit, filenames, and SHA-256 hashes. See
 [Release Evidence Protocol](docs/RELEASE_EVIDENCE.md).
 
+The release-blocking next product milestone is the
+[Premium Command Center](docs/PRODUCT_ROADMAP.md): icon-led navigation,
+high-quality motion and focus states, working quick controls, searchable deep
+settings, and explicit capability status instead of non-functional controls.
+The evolving setting-surface comparison is recorded in
+[Settings Coverage](docs/SETTINGS_COVERAGE.md).
+
 ## Build
 
 Requirements:

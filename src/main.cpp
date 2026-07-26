@@ -1,3 +1,4 @@
+#include "app_preferences.h"
 #include "resonith_file.h"
 #include "wave_player.h"
 
@@ -41,6 +42,18 @@ constexpr UINT animation_timer_id = 1U;
 constexpr UINT animation_interval_ms = 16U;
 constexpr float design_dpi = 96.0F;
 constexpr std::size_t spectrum_bar_count = 24U;
+constexpr std::size_t command_page_count = 8U;
+
+enum class command_page : std::size_t {
+    overview,
+    playback,
+    audio,
+    visuals,
+    video,
+    subtitles,
+    interface_page,
+    advanced,
+};
 
 struct completion_payload {
     std::uint64_t generation = 0U;
@@ -55,6 +68,7 @@ struct decode_payload {
 };
 
 struct visual_layout {
+    D2D1_RECT_F command;
     D2D1_RECT_F open;
     D2D1_RECT_F hero;
     D2D1_RECT_F visualizer;
@@ -64,6 +78,13 @@ struct visual_layout {
     D2D1_RECT_F stop;
     D2D1_RECT_F forward;
     D2D1_RECT_F volume;
+};
+
+struct command_center_layout {
+    D2D1_RECT_F panel;
+    D2D1_RECT_F close;
+    std::array<D2D1_RECT_F, command_page_count> navigation;
+    std::array<D2D1_RECT_F, 6U> actions;
 };
 
 struct graphics_state {
@@ -120,17 +141,21 @@ struct app_state {
     orkela::wave_player player;
     std::vector<float> waveform;
     std::array<float, spectrum_bar_count> spectrum{};
+    orkela::app_preferences preferences;
     std::wstring format_name = L"NO MEDIA";
     std::wstring status =
         L"Drop a .resonith file here or choose Open media.";
     std::uint32_t cursor_frame = 0U;
     std::uint64_t playback_generation = 0U;
     std::uint64_t decode_generation = 0U;
+    std::uint32_t animation_tick = 0U;
     float volume = 0.85F;
     float dpi = design_dpi;
     D2D1_POINT_2F mouse{};
     bool mouse_inside = false;
     bool decoding = false;
+    bool command_center_open = false;
+    command_page active_command_page = command_page::overview;
     std::atomic_bool closing{false};
 };
 
@@ -168,6 +193,7 @@ visual_layout make_layout(D2D1_SIZE_F size) {
     const float progress_y = height - 130.0F;
     const float center_x = width * 0.5F;
     return {
+        D2D1::RectF(width - 346.0F, 24.0F, width - 198.0F, 66.0F),
         D2D1::RectF(width - 186.0F, 24.0F, width - margin, 66.0F),
         D2D1::RectF(
             margin,
@@ -197,6 +223,64 @@ visual_layout make_layout(D2D1_SIZE_F size) {
                     center_x + 162.0F, control_y + 23.0F),
         D2D1::RectF(width - 190.0F, control_y - 3.0F,
                     width - margin, control_y + 3.0F),
+    };
+}
+
+command_center_layout make_command_center_layout(D2D1_SIZE_F size) {
+    const float outer = size.width < 860.0F ? 14.0F : 24.0F;
+    const D2D1_RECT_F panel = D2D1::RectF(
+        outer,
+        outer,
+        size.width - outer,
+        size.height - outer
+    );
+    const float navigation_left = panel.left + 18.0F;
+    const float navigation_right = std::min(
+        panel.left + 196.0F,
+        panel.right - 410.0F
+    );
+    std::array<D2D1_RECT_F, command_page_count> navigation{};
+    for (std::size_t index = 0U; index < navigation.size(); ++index) {
+        const float top = panel.top + 96.0F
+            + static_cast<float>(index) * 46.0F;
+        navigation[index] = D2D1::RectF(
+            navigation_left,
+            top,
+            navigation_right,
+            top + 38.0F
+        );
+    }
+
+    const float content_left = navigation_right + 26.0F;
+    const float content_right = panel.right - 22.0F;
+    const float content_top = panel.top + 148.0F;
+    const float gap = 12.0F;
+    const float tile_width = (content_right - content_left - gap) * 0.5F;
+    const float available_height = panel.bottom - content_top - 24.0F;
+    const float tile_height = (available_height - gap * 2.0F) / 3.0F;
+    std::array<D2D1_RECT_F, 6U> actions{};
+    for (std::size_t index = 0U; index < actions.size(); ++index) {
+        const float left = content_left
+            + static_cast<float>(index % 2U) * (tile_width + gap);
+        const float top = content_top
+            + static_cast<float>(index / 2U) * (tile_height + gap);
+        actions[index] = D2D1::RectF(
+            left,
+            top,
+            left + tile_width,
+            top + tile_height
+        );
+    }
+    return {
+        panel,
+        D2D1::RectF(
+            panel.right - 54.0F,
+            panel.top + 18.0F,
+            panel.right - 18.0F,
+            panel.top + 54.0F
+        ),
+        navigation,
+        actions,
     };
 }
 
@@ -780,6 +864,622 @@ void draw_skip_icon(
     }
 }
 
+struct setting_tile {
+    std::wstring title;
+    std::wstring detail;
+    std::wstring value;
+    bool interactive = false;
+    bool active = false;
+    bool locked = false;
+};
+
+const std::array<std::wstring, command_page_count> command_navigation = {
+    L"✦  Overview",
+    L"▶  Playback",
+    L"◉  Audio",
+    L"▥  Visuals",
+    L"▣  Video",
+    L"CC  Subtitles",
+    L"◇  Interface",
+    L"⚙  Advanced",
+};
+
+std::wstring command_page_title(command_page page) {
+    switch (page) {
+    case command_page::overview:
+        return L"Command Center";
+    case command_page::playback:
+        return L"Playback";
+    case command_page::audio:
+        return L"Audio";
+    case command_page::visuals:
+        return L"Visual Intelligence";
+    case command_page::video:
+        return L"SceneLith Video";
+    case command_page::subtitles:
+        return L"Subtitles & Accessibility";
+    case command_page::interface_page:
+        return L"Interface";
+    case command_page::advanced:
+        return L"Advanced & Trust";
+    }
+    return L"Command Center";
+}
+
+std::wstring command_page_description(command_page page) {
+    switch (page) {
+    case command_page::overview:
+        return L"Your most useful session controls, one glance away.";
+    case command_page::playback:
+        return L"Behavior, navigation, continuity, and repeat.";
+    case command_page::audio:
+        return L"Truth-preserving audio output and listening preferences.";
+    case command_page::visuals:
+        return L"Responsive signal views with a restrained GPU footprint.";
+    case command_page::video:
+        return L"Prepared for the independent SceneLith decoder.";
+    case command_page::subtitles:
+        return L"Readable, synchronized, multilingual presentation.";
+    case command_page::interface_page:
+        return L"Motion, density, DPI, theme, and interaction.";
+    case command_page::advanced:
+        return L"Decoder integrity, offline guarantees, and diagnostics.";
+    }
+    return {};
+}
+
+std::array<setting_tile, 6U> command_tiles(const app_state* state) {
+    const auto& preferences = state->preferences;
+    const auto toggle_value = [](bool value) {
+        return value ? std::wstring(L"ON") : std::wstring(L"OFF");
+    };
+    switch (state->active_command_page) {
+    case command_page::overview:
+        return {{
+            {
+                L"Autoplay",
+                L"Start verified media immediately after decode.",
+                toggle_value(preferences.autoplay_on_open),
+                true,
+                preferences.autoplay_on_open,
+            },
+            {
+                L"Resume position",
+                L"Continue the last opened file from its saved point.",
+                toggle_value(preferences.resume_last_position),
+                true,
+                preferences.resume_last_position,
+            },
+            {
+                L"Living visuals",
+                L"Animate spectrum and playback field at display cadence.",
+                toggle_value(preferences.animate_visuals),
+                true,
+                preferences.animate_visuals,
+            },
+            {
+                L"Truth spectrum",
+                L"Show analysis derived from reconstructed PCM.",
+                toggle_value(preferences.show_spectrum),
+                true,
+                preferences.show_spectrum,
+            },
+            {
+                L"Navigation step",
+                L"Click to cycle the keyboard and transport skip interval.",
+                std::to_wstring(preferences.skip_seconds) + L" SECONDS",
+                true,
+                true,
+            },
+            {
+                L"Repeat current",
+                L"Restart the current item after clean end-of-stream.",
+                toggle_value(preferences.loop_current_media),
+                true,
+                preferences.loop_current_media,
+            },
+        }};
+    case command_page::playback:
+        return {{
+            {
+                L"Autoplay on open",
+                L"Runs only after successful bounded decoder preflight.",
+                toggle_value(preferences.autoplay_on_open),
+                true,
+                preferences.autoplay_on_open,
+            },
+            {
+                L"Remember position",
+                L"Stores one local resume point; never enters the codec.",
+                toggle_value(preferences.resume_last_position),
+                true,
+                preferences.resume_last_position,
+            },
+            {
+                L"Repeat current",
+                L"Loop the active item without rebuilding its bitstream.",
+                toggle_value(preferences.loop_current_media),
+                true,
+                preferences.loop_current_media,
+            },
+            {
+                L"Seek step",
+                L"Cycle between precise, standard, and long navigation.",
+                std::to_wstring(preferences.skip_seconds) + L" SECONDS",
+                true,
+                true,
+            },
+            {
+                L"Playback speed",
+                L"Pitch-safe time scaling needs a dedicated DSP path.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+            {
+                L"Bookmarks & queue",
+                L"Versioned media-library state arrives with playlists.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+        }};
+    case command_page::audio:
+        return {{
+            {
+                L"Remember volume",
+                L"Restore the listening level when Orkela starts.",
+                toggle_value(preferences.remember_volume),
+                true,
+                preferences.remember_volume,
+            },
+            {
+                L"Listening level",
+                L"Click to cycle 50%, 85%, and 100%.",
+                std::to_wstring(
+                    static_cast<int>(std::lround(state->volume * 100.0F))
+                ) + L"%",
+                true,
+                state->volume > 0.0F,
+            },
+            {
+                L"Output device",
+                L"Uses the Windows default PCM endpoint in this milestone.",
+                L"SYSTEM DEFAULT",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Truth path",
+                L"Resonith Core → PCM16 → device; no WAV intermediary.",
+                L"DIRECT",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Equalizer & dynamics",
+                L"Will run after Truth decode as optional presentation DSP.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+            {
+                L"Spatial rendering",
+                L"Headphones, speakers, room, and SceneLith AV Bridge.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+        }};
+    case command_page::visuals:
+        return {{
+            {
+                L"Living visuals",
+                L"Animate only presentation state, never decoder Truth.",
+                toggle_value(preferences.animate_visuals),
+                true,
+                preferences.animate_visuals,
+            },
+            {
+                L"PCM spectrum",
+                L"Show or hide the reconstructed-signal spectrum.",
+                toggle_value(preferences.show_spectrum),
+                true,
+                preferences.show_spectrum,
+            },
+            {
+                L"Truth waveform",
+                L"Whole-file waveform computed from decoded PCM.",
+                L"ALWAYS ON",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Refresh cadence",
+                L"Presentation follows a 16 ms timer while active.",
+                L"UP TO 60 HZ",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Visualizers",
+                L"Scope, field, phase, loudness, and immersive views.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+            {
+                L"Fullscreen focus",
+                L"Distraction-free visualization and video canvas.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+        }};
+    case command_page::video:
+        return {{
+            {L"SceneLith Core", L"Independent visual decoder integration.", L"PENDING CORE"},
+            {L"Aspect & crop", L"Fit, fill, native ratio, and safe crop.", L"PLANNED"},
+            {L"HDR pipeline", L"Color management and display capability map.", L"PLANNED"},
+            {L"Frame presentation", L"Continuous scene state to display cadence.", L"PLANNED"},
+            {L"Deinterlace", L"Compatibility path for legacy raster sources.", L"PLANNED"},
+            {L"Snapshot", L"Export the exact presented visual state.", L"PLANNED"},
+        }};
+    case command_page::subtitles:
+        return {{
+            {L"Track selection", L"Embedded and external subtitle streams.", L"PLANNED"},
+            {L"Typography", L"Font, size, weight, outline, and background.", L"PLANNED"},
+            {L"Synchronization", L"Fine delay and durable per-item correction.", L"PLANNED"},
+            {L"Languages", L"Preference order and accessibility metadata.", L"PLANNED"},
+            {L"Position", L"Safe-area alignment and collision avoidance.", L"PLANNED"},
+            {L"Live captions", L"Optional non-Truth local accessibility layer.", L"RESEARCH"},
+        }};
+    case command_page::interface_page:
+        return {{
+            {
+                L"Interface motion",
+                L"Disable animation while keeping transport responsive.",
+                toggle_value(preferences.animate_visuals),
+                true,
+                preferences.animate_visuals,
+            },
+            {
+                L"High-DPI layout",
+                L"Per-monitor scaling with work-area constraints.",
+                L"AUTOMATIC",
+                false,
+                true,
+                true,
+            },
+            {L"Theme", L"Midnight glass is the current authored theme.", L"MIDNIGHT"},
+            {L"Compact mode", L"Reduced chrome for small desktop windows.", L"PLANNED"},
+            {L"Global hotkeys", L"System-wide transport controls.", L"PLANNED"},
+            {L"Language", L"Localized UI with invariant format terminology.", L"PLANNED"},
+        }};
+    case command_page::advanced:
+        return {{
+            {
+                L"Bounded preflight",
+                L"Sizes and decoder limits are validated before playback.",
+                L"LOCKED ON",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Offline playback",
+                L"No runtime network access or remote codec execution.",
+                L"LOCKED ON",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Reset preferences",
+                L"Return session and presentation settings to defaults.",
+                L"RESET",
+                true,
+                false,
+            },
+            {
+                L"Format compatibility",
+                L"Prospective LPS4/LPS5 inputs remain explicitly research.",
+                L"VISIBLE",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Diagnostics",
+                L"Hashes and release evidence are published per version.",
+                L"VERSIONED",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Developer controls",
+                L"Verbose traces stay out of the audio callback.",
+                L"ROADMAP",
+                false,
+                false,
+            },
+        }};
+    }
+    return {};
+}
+
+void draw_toggle(
+    ID2D1RenderTarget* target,
+    ID2D1Brush* active_brush,
+    ID2D1Brush* inactive_brush,
+    D2D1_RECT_F rectangle,
+    bool active
+) {
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(rectangle, 10.0F, 10.0F),
+        active ? active_brush : inactive_brush
+    );
+    const float center_y = (rectangle.top + rectangle.bottom) * 0.5F;
+    const float center_x = active
+        ? rectangle.right - 10.0F
+        : rectangle.left + 10.0F;
+    target->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(center_x, center_y), 6.0F, 6.0F),
+        active ? inactive_brush : active_brush
+    );
+}
+
+void render_command_center(app_state* state, D2D1_SIZE_F size) {
+    if (!state->command_center_open) {
+        return;
+    }
+    auto& graphics = state->graphics;
+    auto* target = graphics.target.Get();
+    const command_center_layout layout = make_command_center_layout(size);
+
+    graphics.panel->SetOpacity(0.96F);
+    target->FillRectangle(
+        D2D1::RectF(0.0F, 0.0F, size.width, size.height),
+        graphics.panel.Get()
+    );
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(layout.panel, 26.0F, 26.0F),
+        graphics.hero_gradient.Get()
+    );
+    graphics.panel->SetOpacity(0.94F);
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(
+            D2D1::RectF(
+                layout.panel.left + 1.0F,
+                layout.panel.top + 1.0F,
+                layout.panel.right - 1.0F,
+                layout.panel.bottom - 1.0F
+            ),
+            25.0F,
+            25.0F
+        ),
+        graphics.panel.Get()
+    );
+    graphics.panel->SetOpacity(1.0F);
+    target->DrawRoundedRectangle(
+        D2D1::RoundedRect(layout.panel, 26.0F, 26.0F),
+        graphics.panel_edge.Get(),
+        1.0F
+    );
+
+    draw_text(
+        target,
+        L"ORKELA",
+        graphics.label_format.Get(),
+        D2D1::RectF(
+            layout.panel.left + 24.0F,
+            layout.panel.top + 20.0F,
+            layout.panel.left + 160.0F,
+            layout.panel.top + 42.0F
+        ),
+        graphics.accent.Get()
+    );
+    draw_text(
+        target,
+        L"Control without clutter",
+        graphics.body_format.Get(),
+        D2D1::RectF(
+            layout.panel.left + 24.0F,
+            layout.panel.top + 45.0F,
+            layout.panel.left + 210.0F,
+            layout.panel.top + 70.0F
+        ),
+        graphics.text_secondary.Get()
+    );
+
+    const bool close_hovered =
+        state->mouse_inside && contains(layout.close, state->mouse);
+    draw_round_button(state, layout.close, close_hovered, false);
+    draw_text(
+        target,
+        L"×",
+        graphics.headline_format.Get(),
+        D2D1::RectF(
+            layout.close.left + 8.0F,
+            layout.close.top - 1.0F,
+            layout.close.right,
+            layout.close.bottom
+        ),
+        graphics.text_primary.Get()
+    );
+
+    for (std::size_t index = 0U; index < layout.navigation.size(); ++index) {
+        const bool selected =
+            index == static_cast<std::size_t>(state->active_command_page);
+        const bool hovered = state->mouse_inside
+            && contains(layout.navigation[index], state->mouse);
+        if (selected || hovered) {
+            graphics.accent_soft->SetOpacity(selected ? 0.74F : 0.25F);
+            target->FillRoundedRectangle(
+                D2D1::RoundedRect(layout.navigation[index], 12.0F, 12.0F),
+                graphics.accent_soft.Get()
+            );
+            graphics.accent_soft->SetOpacity(1.0F);
+        }
+        draw_text(
+            target,
+            command_navigation[index],
+            graphics.button_format.Get(),
+            D2D1::RectF(
+                layout.navigation[index].left + 12.0F,
+                layout.navigation[index].top + 9.0F,
+                layout.navigation[index].right - 4.0F,
+                layout.navigation[index].bottom
+            ),
+            selected
+                ? graphics.text_primary.Get()
+                : graphics.text_secondary.Get()
+        );
+    }
+
+    const float content_left = layout.actions[0].left;
+    draw_text(
+        target,
+        command_page_title(state->active_command_page),
+        graphics.headline_format.Get(),
+        D2D1::RectF(
+            content_left,
+            layout.panel.top + 24.0F,
+            layout.close.left - 12.0F,
+            layout.panel.top + 66.0F
+        ),
+        graphics.text_primary.Get()
+    );
+    draw_text(
+        target,
+        command_page_description(state->active_command_page),
+        graphics.body_format.Get(),
+        D2D1::RectF(
+            content_left + 2.0F,
+            layout.panel.top + 70.0F,
+            layout.close.left - 8.0F,
+            layout.panel.top + 96.0F
+        ),
+        graphics.text_secondary.Get()
+    );
+    draw_text(
+        target,
+        L"LIVE SETTINGS  ·  0.2.0-alpha.2",
+        graphics.label_format.Get(),
+        D2D1::RectF(
+            content_left + 2.0F,
+            layout.panel.top + 108.0F,
+            layout.panel.right - 24.0F,
+            layout.panel.top + 132.0F
+        ),
+        graphics.accent.Get()
+    );
+
+    const auto tiles = command_tiles(state);
+    for (std::size_t index = 0U; index < tiles.size(); ++index) {
+        const auto& tile = tiles[index];
+        const D2D1_RECT_F rectangle = layout.actions[index];
+        const bool hovered = tile.interactive
+            && state->mouse_inside
+            && contains(rectangle, state->mouse);
+        graphics.panel_edge->SetOpacity(hovered ? 0.86F : 0.40F);
+        target->FillRoundedRectangle(
+            D2D1::RoundedRect(rectangle, 16.0F, 16.0F),
+            graphics.panel_edge.Get()
+        );
+        graphics.panel_edge->SetOpacity(1.0F);
+        target->DrawRoundedRectangle(
+            D2D1::RoundedRect(rectangle, 16.0F, 16.0F),
+            hovered ? graphics.accent.Get() : graphics.panel_edge.Get(),
+            hovered ? 1.4F : 0.8F
+        );
+        target->FillEllipse(
+            D2D1::Ellipse(
+                D2D1::Point2F(rectangle.left + 18.0F, rectangle.top + 21.0F),
+                4.0F,
+                4.0F
+            ),
+            tile.active ? graphics.accent.Get() : graphics.muted.Get()
+        );
+        draw_text(
+            target,
+            tile.title,
+            graphics.button_format.Get(),
+            D2D1::RectF(
+                rectangle.left + 31.0F,
+                rectangle.top + 11.0F,
+                rectangle.right - 52.0F,
+                rectangle.top + 34.0F
+            ),
+            graphics.text_primary.Get()
+        );
+        draw_text(
+            target,
+            tile.detail,
+            graphics.label_format.Get(),
+            D2D1::RectF(
+                rectangle.left + 16.0F,
+                rectangle.top + 40.0F,
+                rectangle.right - 16.0F,
+                rectangle.bottom - 26.0F
+            ),
+            graphics.text_secondary.Get()
+        );
+        draw_text(
+            target,
+            tile.value,
+            graphics.label_format.Get(),
+            D2D1::RectF(
+                rectangle.left + 16.0F,
+                rectangle.bottom - 24.0F,
+                rectangle.right - 16.0F,
+                rectangle.bottom - 4.0F
+            ),
+            tile.interactive
+                ? graphics.accent.Get()
+                : graphics.text_secondary.Get()
+        );
+        if (
+            tile.interactive
+            && (
+                tile.value == L"ON"
+                || tile.value == L"OFF"
+            )
+        ) {
+            draw_toggle(
+                target,
+                graphics.accent.Get(),
+                graphics.text_primary.Get(),
+                D2D1::RectF(
+                    rectangle.right - 42.0F,
+                    rectangle.top + 12.0F,
+                    rectangle.right - 14.0F,
+                    rectangle.top + 30.0F
+                ),
+                tile.active
+            );
+        } else if (tile.locked) {
+            draw_text(
+                target,
+                L"◆",
+                graphics.label_format.Get(),
+                D2D1::RectF(
+                    rectangle.right - 31.0F,
+                    rectangle.top + 12.0F,
+                    rectangle.right - 10.0F,
+                    rectangle.top + 31.0F
+                ),
+                graphics.accent.Get()
+            );
+        }
+    }
+}
+
 void render(app_state* state) {
     if (state == nullptr || FAILED(ensure_graphics(state))) {
         return;
@@ -819,6 +1519,63 @@ void render(app_state* state) {
         graphics.label_format.Get(),
         D2D1::RectF(90.0F, 53.0F, 300.0F, 74.0F),
         graphics.text_secondary.Get()
+    );
+
+    const bool command_hovered =
+        state->mouse_inside && contains(layout.command, state->mouse);
+    draw_round_button(
+        state,
+        layout.command,
+        command_hovered || state->command_center_open,
+        false
+    );
+    target->DrawLine(
+        D2D1::Point2F(
+            layout.command.left + 15.0F,
+            layout.command.top + 16.0F
+        ),
+        D2D1::Point2F(
+            layout.command.left + 25.0F,
+            layout.command.top + 16.0F
+        ),
+        graphics.accent.Get(),
+        1.8F
+    );
+    target->DrawLine(
+        D2D1::Point2F(
+            layout.command.left + 15.0F,
+            layout.command.top + 22.0F
+        ),
+        D2D1::Point2F(
+            layout.command.left + 25.0F,
+            layout.command.top + 22.0F
+        ),
+        graphics.accent.Get(),
+        1.8F
+    );
+    target->DrawLine(
+        D2D1::Point2F(
+            layout.command.left + 15.0F,
+            layout.command.top + 28.0F
+        ),
+        D2D1::Point2F(
+            layout.command.left + 25.0F,
+            layout.command.top + 28.0F
+        ),
+        graphics.accent.Get(),
+        1.8F
+    );
+    draw_text(
+        target,
+        L"COMMAND",
+        graphics.button_format.Get(),
+        D2D1::RectF(
+            layout.command.left + 36.0F,
+            layout.command.top + 11.0F,
+            layout.command.right - 10.0F,
+            layout.command.bottom
+        ),
+        graphics.text_primary.Get()
     );
 
     const bool open_hovered =
@@ -1008,27 +1765,42 @@ void render(app_state* state) {
     const float spectrum_left = wave_area.right - spectrum_width;
     const float bar_step =
         spectrum_width / static_cast<float>(spectrum_bar_count);
-    graphics.accent_soft->SetOpacity(has_audio ? 0.70F : 0.12F);
-    for (std::size_t index = 0U; index < spectrum_bar_count; ++index) {
-        const float height = 4.0F
-            + state->spectrum[index] * rectangle_height(wave_area) * 0.72F;
-        const float left = spectrum_left
-            + static_cast<float>(index) * bar_step;
-        target->FillRoundedRectangle(
-            D2D1::RoundedRect(
-                D2D1::RectF(
-                    left + 1.0F,
-                    wave_area.bottom - height,
-                    left + bar_step - 1.5F,
-                    wave_area.bottom
+    if (state->preferences.show_spectrum) {
+        graphics.accent_soft->SetOpacity(has_audio ? 0.70F : 0.12F);
+        for (std::size_t index = 0U; index < spectrum_bar_count; ++index) {
+            const float height = 4.0F
+                + state->spectrum[index] * rectangle_height(wave_area) * 0.72F;
+            const float left = spectrum_left
+                + static_cast<float>(index) * bar_step;
+            target->FillRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(
+                        left + 1.0F,
+                        wave_area.bottom - height,
+                        left + bar_step - 1.5F,
+                        wave_area.bottom
+                    ),
+                    2.5F,
+                    2.5F
                 ),
-                2.5F,
-                2.5F
+                graphics.accent_soft.Get()
+            );
+        }
+        graphics.accent_soft->SetOpacity(1.0F);
+    } else {
+        draw_text(
+            target,
+            L"SPECTRUM HIDDEN",
+            graphics.label_format.Get(),
+            D2D1::RectF(
+                spectrum_left,
+                wave_area.bottom - 24.0F,
+                wave_area.right,
+                wave_area.bottom
             ),
-            graphics.accent_soft.Get()
+            graphics.text_secondary.Get()
         );
     }
-    graphics.accent_soft->SetOpacity(1.0F);
 
     target->FillRoundedRectangle(
         D2D1::RoundedRect(layout.progress, 3.0F, 3.0F),
@@ -1182,6 +1954,8 @@ void render(app_state* state) {
         graphics.text_secondary.Get()
     );
 
+    render_command_center(state, size);
+
     const HRESULT status = target->EndDraw();
     if (status == D2DERR_RECREATE_TARGET) {
         graphics.discard_device_resources();
@@ -1194,12 +1968,32 @@ void invalidate(app_state* state) {
     }
 }
 
+void save_session_preferences(app_state* state) {
+    if (state == nullptr) {
+        return;
+    }
+    state->preferences.volume = state->volume;
+    if (
+        state->preferences.resume_last_position
+        && state->audio != nullptr
+        && !state->path.empty()
+    ) {
+        state->preferences.last_media = state->path;
+        state->preferences.last_frame = state->cursor_frame;
+    }
+    orkela::save_preferences(state->preferences);
+}
+
 void stop_playback(app_state* state, bool reset_position) {
     if (state == nullptr) {
         return;
     }
+    if (state->player.is_playing()) {
+        state->cursor_frame = state->player.position_frame();
+    }
     ++state->playback_generation;
     state->player.stop();
+    save_session_preferences(state);
     if (reset_position) {
         state->cursor_frame = 0U;
     }
@@ -1414,6 +2208,150 @@ D2D1_POINT_2F point_from_message(app_state* state, LPARAM value) {
     );
 }
 
+void cycle_skip_interval(orkela::app_preferences* preferences) {
+    if (preferences->skip_seconds == 5U) {
+        preferences->skip_seconds = 10U;
+    } else if (preferences->skip_seconds == 10U) {
+        preferences->skip_seconds = 30U;
+    } else {
+        preferences->skip_seconds = 5U;
+    }
+}
+
+void cycle_listening_level(app_state* state) {
+    const int percent = static_cast<int>(
+        std::lround(state->volume * 100.0F)
+    );
+    if (percent < 67) {
+        state->volume = 0.85F;
+    } else if (percent < 93) {
+        state->volume = 1.0F;
+    } else {
+        state->volume = 0.50F;
+    }
+    state->player.set_volume(state->volume);
+}
+
+void activate_command_tile(app_state* state, std::size_t index) {
+    auto& preferences = state->preferences;
+    switch (state->active_command_page) {
+    case command_page::overview:
+        if (index == 0U) {
+            preferences.autoplay_on_open = !preferences.autoplay_on_open;
+        } else if (index == 1U) {
+            preferences.resume_last_position =
+                !preferences.resume_last_position;
+        } else if (index == 2U) {
+            preferences.animate_visuals = !preferences.animate_visuals;
+        } else if (index == 3U) {
+            preferences.show_spectrum = !preferences.show_spectrum;
+        } else if (index == 4U) {
+            cycle_skip_interval(&preferences);
+        } else if (index == 5U) {
+            preferences.loop_current_media =
+                !preferences.loop_current_media;
+        }
+        break;
+    case command_page::playback:
+        if (index == 0U) {
+            preferences.autoplay_on_open = !preferences.autoplay_on_open;
+        } else if (index == 1U) {
+            preferences.resume_last_position =
+                !preferences.resume_last_position;
+        } else if (index == 2U) {
+            preferences.loop_current_media =
+                !preferences.loop_current_media;
+        } else if (index == 3U) {
+            cycle_skip_interval(&preferences);
+        } else {
+            return;
+        }
+        break;
+    case command_page::audio:
+        if (index == 0U) {
+            preferences.remember_volume = !preferences.remember_volume;
+        } else if (index == 1U) {
+            cycle_listening_level(state);
+        } else {
+            return;
+        }
+        break;
+    case command_page::visuals:
+        if (index == 0U) {
+            preferences.animate_visuals = !preferences.animate_visuals;
+        } else if (index == 1U) {
+            preferences.show_spectrum = !preferences.show_spectrum;
+        } else {
+            return;
+        }
+        break;
+    case command_page::interface_page:
+        if (index == 0U) {
+            preferences.animate_visuals = !preferences.animate_visuals;
+        } else {
+            return;
+        }
+        break;
+    case command_page::advanced:
+        if (index != 2U) {
+            return;
+        }
+        orkela::reset_preferences();
+        preferences = {};
+        state->volume = preferences.volume;
+        state->player.set_volume(state->volume);
+        state->status = L"Preferences reset to Orkela defaults.";
+        break;
+    case command_page::video:
+    case command_page::subtitles:
+        return;
+    }
+    save_session_preferences(state);
+    invalidate(state);
+}
+
+bool handle_command_center_click(
+    app_state* state,
+    D2D1_POINT_2F point,
+    const visual_layout& base_layout
+) {
+    if (contains(base_layout.command, point)) {
+        state->command_center_open = !state->command_center_open;
+        invalidate(state);
+        return true;
+    }
+    if (!state->command_center_open) {
+        return false;
+    }
+    const command_center_layout layout = make_command_center_layout(
+        state->graphics.target->GetSize()
+    );
+    if (contains(layout.close, point)) {
+        state->command_center_open = false;
+        invalidate(state);
+        return true;
+    }
+    for (std::size_t index = 0U; index < layout.navigation.size(); ++index) {
+        if (contains(layout.navigation[index], point)) {
+            state->active_command_page =
+                static_cast<command_page>(index);
+            invalidate(state);
+            return true;
+        }
+    }
+    const auto tiles = command_tiles(state);
+    for (std::size_t index = 0U; index < layout.actions.size(); ++index) {
+        if (
+            tiles[index].interactive
+            && contains(layout.actions[index], point)
+        ) {
+            activate_command_tile(state, index);
+            return true;
+        }
+    }
+    return true;
+}
+
 void handle_click(app_state* state, D2D1_POINT_2F point) {
     if (
         state == nullptr
@@ -1423,6 +2361,9 @@ void handle_click(app_state* state, D2D1_POINT_2F point) {
     }
     const visual_layout layout =
         make_layout(state->graphics.target->GetSize());
+    if (handle_command_center_click(state, point, layout)) {
+        return;
+    }
     if (contains(layout.open, point)) {
         choose_file(state);
     } else if (contains(layout.play, point)) {
@@ -1432,9 +2373,15 @@ void handle_click(app_state* state, D2D1_POINT_2F point) {
         state->status = L"Playback stopped.";
         invalidate(state);
     } else if (contains(layout.rewind, point)) {
-        seek_relative(state, -10);
+        seek_relative(
+            state,
+            -static_cast<std::int64_t>(state->preferences.skip_seconds)
+        );
     } else if (contains(layout.forward, point)) {
-        seek_relative(state, 10);
+        seek_relative(
+            state,
+            static_cast<std::int64_t>(state->preferences.skip_seconds)
+        );
     } else if (
         contains(layout.progress, point)
         && state->audio != nullptr
@@ -1459,6 +2406,7 @@ void handle_click(app_state* state, D2D1_POINT_2F point) {
             1.0F
         );
         state->player.set_volume(state->volume);
+        save_session_preferences(state);
         invalidate(state);
     }
 }
@@ -1516,6 +2464,11 @@ LRESULT CALLBACK window_procedure(
         created->instance = reinterpret_cast<LPCREATESTRUCTW>(long_word)
             ->hInstance;
         created->dpi = static_cast<float>(GetDpiForWindow(window));
+        created->preferences = orkela::load_preferences();
+        created->volume = created->preferences.remember_volume
+            ? created->preferences.volume
+            : 0.85F;
+        created->player.set_volume(created->volume);
         SetWindowLongPtrW(
             window,
             GWLP_USERDATA,
@@ -1614,12 +2567,48 @@ LRESULT CALLBACK window_procedure(
         if (state == nullptr) {
             return 0;
         }
-        if (word == VK_SPACE) {
+        if (
+            word == VK_OEM_COMMA
+            && (GetKeyState(VK_CONTROL) < 0)
+        ) {
+            state->command_center_open = !state->command_center_open;
+            invalidate(state);
+        } else if (
+            state->command_center_open
+            && word == VK_ESCAPE
+        ) {
+            state->command_center_open = false;
+            invalidate(state);
+        } else if (
+            state->command_center_open
+            && (word == VK_UP || word == VK_DOWN)
+        ) {
+            const std::size_t current =
+                static_cast<std::size_t>(state->active_command_page);
+            const std::size_t next = word == VK_DOWN
+                ? (current + 1U) % command_page_count
+                : (current + command_page_count - 1U)
+                    % command_page_count;
+            state->active_command_page = static_cast<command_page>(next);
+            invalidate(state);
+        } else if (state->command_center_open) {
+            return 0;
+        } else if (word == VK_SPACE) {
             toggle_playback(state);
         } else if (word == VK_LEFT) {
-            seek_relative(state, -5);
+            seek_relative(
+                state,
+                -static_cast<std::int64_t>(
+                    state->preferences.skip_seconds
+                )
+            );
         } else if (word == VK_RIGHT) {
-            seek_relative(state, 5);
+            seek_relative(
+                state,
+                static_cast<std::int64_t>(
+                    state->preferences.skip_seconds
+                )
+            );
         } else if (word == VK_ESCAPE) {
             stop_playback(state, true);
             state->status = L"Playback stopped.";
@@ -1649,11 +2638,26 @@ LRESULT CALLBACK window_procedure(
     }
     case WM_TIMER:
         if (state != nullptr && word == animation_timer_id) {
+            ++state->animation_tick;
             if (state->player.is_playing()) {
                 state->cursor_frame = state->player.position_frame();
             }
-            update_spectrum(state);
-            invalidate(state);
+            const bool animate = state->preferences.animate_visuals;
+            const bool coarse_tick = state->animation_tick % 15U == 0U;
+            if (
+                state->preferences.show_spectrum
+                && (animate || coarse_tick)
+            ) {
+                update_spectrum(state);
+            }
+            if (
+                animate
+                || coarse_tick
+                || state->decoding
+                || state->command_center_open
+            ) {
+                invalidate(state);
+            }
         }
         return 0;
     case playback_done_message: {
@@ -1667,6 +2671,15 @@ LRESULT CALLBACK window_procedure(
         ) {
             state->cursor_frame = state->player.position_frame();
             state->status = std::move(payload->message);
+            if (
+                state->preferences.loop_current_media
+                && state->status == L"Playback complete."
+                && state->audio != nullptr
+            ) {
+                begin_playback(state, 0U);
+                return 0;
+            }
+            save_session_preferences(state);
             invalidate(state);
         }
         return 0;
@@ -1698,16 +2711,32 @@ LRESULT CALLBACK window_procedure(
             ? L"RESONITH · NATIVE TRUTH"
             : L"RESONITH · RESEARCH TRANSPORT";
         state->status =
-            L"Ready. Space plays or pauses; arrows seek by five seconds.";
-        state->cursor_frame = 0U;
+            L"Ready. Space plays or pauses; arrows use the selected seek step.";
+        const bool same_resume_item =
+            state->preferences.resume_last_position
+            && lowercase(state->preferences.last_media.wstring())
+                == lowercase(state->path.wstring());
+        state->cursor_frame = same_resume_item
+            ? std::min(
+                state->preferences.last_frame,
+                state->audio->frame_count
+            )
+            : 0U;
+        state->preferences.last_media = state->path;
+        state->preferences.last_frame = state->cursor_frame;
+        save_session_preferences(state);
         update_spectrum(state);
         invalidate(state);
+        if (state->preferences.autoplay_on_open) {
+            begin_playback(state, state->cursor_frame);
+        }
         return 0;
     }
     case WM_CLOSE:
         if (state != nullptr) {
             state->closing.store(true);
             ++state->decode_generation;
+            save_session_preferences(state);
             stop_playback(state, false);
         }
         DestroyWindow(window);
