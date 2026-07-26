@@ -36,6 +36,7 @@ an unavailable decoder.
 - open, play/pause, stop, seek, skip, volume, keyboard controls, and
   file drag-and-drop;
 - direct LPS4/LPS5 preflight and decoding through Resonith Core;
+- responsive background preflight/decode for long-form media;
 - mono and stereo PCM16 output through the Windows multimedia device;
 - no runtime network access and no external codec process.
 

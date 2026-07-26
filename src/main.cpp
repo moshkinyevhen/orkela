@@ -27,6 +27,7 @@
 #include <numbers>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr UINT playback_done_message = WM_APP + 1U;
+constexpr UINT decode_done_message = WM_APP + 2U;
 constexpr UINT animation_timer_id = 1U;
 constexpr UINT animation_interval_ms = 16U;
 constexpr float design_dpi = 96.0F;
@@ -43,6 +45,13 @@ constexpr std::size_t spectrum_bar_count = 24U;
 struct completion_payload {
     std::uint64_t generation = 0U;
     std::wstring message;
+};
+
+struct decode_payload {
+    std::uint64_t generation = 0U;
+    std::filesystem::path path;
+    std::shared_ptr<const orkela::decoded_audio> audio;
+    std::wstring error;
 };
 
 struct visual_layout {
@@ -116,10 +125,12 @@ struct app_state {
         L"Drop a .resonith file here or choose Open media.";
     std::uint32_t cursor_frame = 0U;
     std::uint64_t playback_generation = 0U;
+    std::uint64_t decode_generation = 0U;
     float volume = 0.85F;
     float dpi = design_dpi;
     D2D1_POINT_2F mouse{};
     bool mouse_inside = false;
+    bool decoding = false;
     std::atomic_bool closing{false};
 };
 
@@ -1294,6 +1305,12 @@ void load_file(app_state* state, const std::filesystem::path& path) {
     if (state == nullptr || path.empty()) {
         return;
     }
+    if (state->decoding) {
+        state->status =
+            L"One bitstream is already being authenticated and decoded.";
+        invalidate(state);
+        return;
+    }
     stop_playback(state, true);
     state->audio.reset();
     state->waveform.clear();
@@ -1335,25 +1352,34 @@ void load_file(app_state* state, const std::filesystem::path& path) {
         return;
     }
 
-    auto decoded = std::make_shared<orkela::decoded_audio>();
-    std::wstring error;
-    if (!orkela::decode_resonith_file(path, decoded.get(), &error)) {
-        state->format_name = L"REJECTED";
-        state->status = std::move(error);
-        invalidate(state);
-        return;
-    }
-
-    state->audio = std::move(decoded);
-    state->waveform = build_waveform(*state->audio);
-    state->format_name = extension == L".resonith"
-        ? L"RESONITH · NATIVE TRUTH"
-        : L"RESONITH · RESEARCH TRANSPORT";
-    state->status =
-        L"Ready. Space plays or pauses; arrows seek by five seconds.";
-    state->cursor_frame = 0U;
-    update_spectrum(state);
-    invalidate(state);
+    state->decoding = true;
+    const std::uint64_t generation = ++state->decode_generation;
+    const HWND window = state->window;
+    std::thread(
+        [window, generation, path]() {
+            auto decoded = std::make_shared<orkela::decoded_audio>();
+            std::wstring error;
+            if (!orkela::decode_resonith_file(path, decoded.get(), &error)) {
+                decoded.reset();
+            }
+            auto* payload = new decode_payload{
+                generation,
+                path,
+                std::move(decoded),
+                std::move(error),
+            };
+            if (
+                PostMessageW(
+                    window,
+                    decode_done_message,
+                    0U,
+                    reinterpret_cast<LPARAM>(payload)
+                ) == FALSE
+            ) {
+                delete payload;
+            }
+        }
+    ).detach();
 }
 
 void choose_file(app_state* state) {
@@ -1645,9 +1671,43 @@ LRESULT CALLBACK window_procedure(
         }
         return 0;
     }
+    case decode_done_message: {
+        std::unique_ptr<decode_payload> payload(
+            reinterpret_cast<decode_payload*>(long_word)
+        );
+        if (
+            state == nullptr
+            || payload == nullptr
+            || payload->generation != state->decode_generation
+        ) {
+            return 0;
+        }
+        state->decoding = false;
+        if (payload->audio == nullptr) {
+            state->format_name = L"REJECTED";
+            state->status = std::move(payload->error);
+            invalidate(state);
+            return 0;
+        }
+        state->path = std::move(payload->path);
+        state->audio = std::move(payload->audio);
+        state->waveform = build_waveform(*state->audio);
+        const std::wstring extension =
+            lowercase(state->path.extension().wstring());
+        state->format_name = extension == L".resonith"
+            ? L"RESONITH · NATIVE TRUTH"
+            : L"RESONITH · RESEARCH TRANSPORT";
+        state->status =
+            L"Ready. Space plays or pauses; arrows seek by five seconds.";
+        state->cursor_frame = 0U;
+        update_spectrum(state);
+        invalidate(state);
+        return 0;
+    }
     case WM_CLOSE:
         if (state != nullptr) {
             state->closing.store(true);
+            ++state->decode_generation;
             stop_playback(state, false);
         }
         DestroyWindow(window);
