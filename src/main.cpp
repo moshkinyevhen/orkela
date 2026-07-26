@@ -145,14 +145,37 @@ D2D1_COLOR_F color(float red, float green, float blue, float alpha = 1.0F) {
 visual_layout make_layout(D2D1_SIZE_F size) {
     const float width = size.width;
     const float height = size.height;
-    const float margin = 32.0F;
-    const float control_y = height - 82.0F;
+    const float margin = width < 820.0F ? 24.0F : 32.0F;
+    const float header_bottom = height < 600.0F ? 76.0F : 92.0F;
+    const float hero_height = std::clamp(
+        height * 0.30F,
+        144.0F,
+        200.0F
+    );
+    const float hero_bottom = header_bottom + hero_height;
+    const float control_y = height - 75.0F;
+    const float progress_y = height - 130.0F;
     const float center_x = width * 0.5F;
     return {
         D2D1::RectF(width - 186.0F, 24.0F, width - margin, 66.0F),
-        D2D1::RectF(margin, 92.0F, width - margin, 292.0F),
-        D2D1::RectF(margin, 312.0F, width - margin, height - 172.0F),
-        D2D1::RectF(margin, height - 145.0F, width - margin, height - 139.0F),
+        D2D1::RectF(
+            margin,
+            header_bottom,
+            width - margin,
+            hero_bottom
+        ),
+        D2D1::RectF(
+            margin,
+            hero_bottom + 16.0F,
+            width - margin,
+            progress_y - 26.0F
+        ),
+        D2D1::RectF(
+            margin,
+            progress_y,
+            width - margin,
+            progress_y + 6.0F
+        ),
         D2D1::RectF(center_x - 116.0F, control_y - 23.0F,
                     center_x - 70.0F, control_y + 23.0F),
         D2D1::RectF(center_x - 30.0F, control_y - 30.0F,
@@ -204,10 +227,9 @@ std::wstring format_details(const orkela::decoded_audio& audio) {
         / static_cast<double>(audio.sample_rate);
     std::wostringstream output;
     output << audio.sample_rate << L" Hz  ·  "
-           << audio.channels
-           << (audio.channels == 1U ? L" channel  ·  " : L" channels  ·  ")
+           << (audio.channels == 1U ? L"Mono  ·  " : L"Stereo  ·  ")
            << std::fixed << std::setprecision(2) << seconds
-           << L" s  ·  PCM16 Truth output";
+           << L" s  ·  PCM16";
     return output.str();
 }
 
@@ -819,13 +841,23 @@ void render(app_state* state) {
         graphics.panel_edge.Get(),
         1.0F
     );
+    const float hero_height = rectangle_height(layout.hero);
+    const float hero_mark_size = std::clamp(
+        hero_height - 40.0F,
+        92.0F,
+        136.0F
+    );
+    const float hero_mark_top =
+        layout.hero.top + (hero_height - hero_mark_size) * 0.5F;
+    const float hero_content_left =
+        layout.hero.left + hero_mark_size + 64.0F;
     target->DrawBitmap(
         graphics.brand_mark.Get(),
         D2D1::RectF(
             layout.hero.left + 28.0F,
-            layout.hero.top + 31.0F,
-            layout.hero.left + 164.0F,
-            layout.hero.top + 167.0F
+            hero_mark_top,
+            layout.hero.left + 28.0F + hero_mark_size,
+            hero_mark_top + hero_mark_size
         ),
         has_audio ? 0.95F : 0.35F,
         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
@@ -842,10 +874,10 @@ void render(app_state* state) {
         title,
         graphics.headline_format.Get(),
         D2D1::RectF(
-            layout.hero.left + 188.0F,
-            layout.hero.top + 41.0F,
+            hero_content_left,
+            layout.hero.top + 24.0F,
             layout.hero.right - 28.0F,
-            layout.hero.top + 86.0F
+            layout.hero.top + 69.0F
         ),
         graphics.text_primary.Get()
     );
@@ -854,22 +886,22 @@ void render(app_state* state) {
         subtitle,
         graphics.body_format.Get(),
         D2D1::RectF(
-            layout.hero.left + 190.0F,
-            layout.hero.top + 91.0F,
+            hero_content_left + 2.0F,
+            layout.hero.top + 70.0F,
             layout.hero.right - 28.0F,
-            layout.hero.top + 122.0F
+            layout.hero.top + 96.0F
         ),
         graphics.text_secondary.Get()
     );
     const D2D1_RECT_F badge = D2D1::RectF(
-        layout.hero.left + 190.0F,
-        layout.hero.top + 137.0F,
-        layout.hero.left + 190.0F
+        hero_content_left + 2.0F,
+        layout.hero.bottom - 44.0F,
+        hero_content_left + 2.0F
             + std::max(
                 116.0F,
                 9.0F * static_cast<float>(state->format_name.size())
             ),
-        layout.hero.top + 169.0F
+        layout.hero.bottom - 12.0F
     );
     graphics.accent_soft->SetOpacity(has_audio ? 0.75F : 0.28F);
     target->FillRoundedRectangle(
@@ -1518,8 +1550,8 @@ LRESULT CALLBACK window_procedure(
         const UINT dpi = state == nullptr
             ? GetDpiForWindow(window)
             : static_cast<UINT>(state->dpi);
-        limits->ptMinTrackSize.x = MulDiv(880, dpi, 96);
-        limits->ptMinTrackSize.y = MulDiv(620, dpi, 96);
+        limits->ptMinTrackSize.x = MulDiv(760, dpi, 96);
+        limits->ptMinTrackSize.y = MulDiv(480, dpi, 96);
         return 0;
     }
     case WM_MOUSEMOVE:
@@ -1677,15 +1709,38 @@ int WINAPI wWinMain(
         return 1;
     }
 
+    RECT work_area{};
+    SystemParametersInfoW(
+        SPI_GETWORKAREA,
+        0U,
+        &work_area,
+        0U
+    );
+    const UINT system_dpi = GetDpiForSystem();
+    const int available_width = work_area.right - work_area.left;
+    const int available_height = work_area.bottom - work_area.top;
+    const int initial_width = std::min(
+        MulDiv(1120, system_dpi, 96),
+        available_width * 92 / 100
+    );
+    const int initial_height = std::min(
+        MulDiv(720, system_dpi, 96),
+        available_height * 92 / 100
+    );
+    const int initial_x =
+        work_area.left + (available_width - initial_width) / 2;
+    const int initial_y =
+        work_area.top + (available_height - initial_height) / 2;
+
     const HWND window = CreateWindowExW(
         0U,
         class_name,
         L"Orkela — Truth-aware media",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        1120,
-        720,
+        initial_x,
+        initial_y,
+        initial_width,
+        initial_height,
         nullptr,
         nullptr,
         instance,

@@ -1,9 +1,11 @@
 # Native Resonith sample
 
-`emotional-piano-resonith.lps5` is an eight-second stereo research clip encoded
-by the prospective Resonith LPS5 transport. Orkela opens this file directly,
-decodes it through Resonith Core, and sends the resulting PCM16 to the Windows
-audio device. No WAV conversion or external decoder is used.
+`emotional-piano.resonith` is the canonical public name of an eight-second
+stereo research clip encoded with the prospective Resonith LPS5 transport.
+`emotional-piano-resonith.lps5` is the identical compatibility copy retained
+for research tooling. Orkela opens either file directly, decodes it through
+Resonith Core, and sends the resulting PCM16 to the Windows audio device. No
+WAV conversion or external decoder is used.
 
 `emotional-piano-original.wav` is the exact PCM16 input used for that
 bitstream and for the rate-matched Opus comparison.

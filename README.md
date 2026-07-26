@@ -32,13 +32,15 @@ an unavailable decoder.
 ## Current milestone
 
 - native C++20 and Win32;
-- open, play, stop, and file drag-and-drop;
+- DPI-aware Direct2D/DirectWrite interface with a PCM-derived spectrum;
+- open, play/pause, stop, seek, skip, volume, keyboard controls, and
+  file drag-and-drop;
 - direct LPS4/LPS5 preflight and decoding through Resonith Core;
 - mono and stereo PCM16 output through the Windows multimedia device;
 - no runtime network access and no external codec process.
 
-This first milestone decodes a complete research clip into bounded application
-memory before playback. Streaming, seeking, playlists, mobile front ends, and
+This milestone decodes a complete research clip into bounded application
+memory before playback. Streaming decode, playlists, mobile front ends, and
 SceneLith video are subsequent milestones.
 
 ## Build
@@ -54,11 +56,18 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-The executable is `build/Release/Orkela.exe`.
+The executable is `build/Release/Orkela.exe`. To register the three canonical
+extensions for the current Windows user without administrator access:
 
-Open `samples/emotional-piano-resonith.lps5` and press **Play** for a native
-end-to-end demonstration. The sample is a real LPS5 bitstream, not PCM with a
-renamed extension; its provenance and hashes are recorded beside the file.
+```powershell
+.\tools\Register-Orkela.ps1 `
+  -ExePath .\build\Release\Orkela.exe
+```
+
+Open `samples/emotional-piano.resonith` and press **Play** for a native
+end-to-end demonstration. The sample contains the real LPS5 research
+transport under the canonical public extension; it is not PCM with a renamed
+extension. Its provenance and hashes are recorded beside the file.
 
 To build against a local Resonith checkout:
 
