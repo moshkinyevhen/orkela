@@ -1709,38 +1709,15 @@ int WINAPI wWinMain(
         return 1;
     }
 
-    RECT work_area{};
-    SystemParametersInfoW(
-        SPI_GETWORKAREA,
-        0U,
-        &work_area,
-        0U
-    );
-    const UINT system_dpi = GetDpiForSystem();
-    const int available_width = work_area.right - work_area.left;
-    const int available_height = work_area.bottom - work_area.top;
-    const int initial_width = std::min(
-        MulDiv(1120, system_dpi, 96),
-        available_width * 92 / 100
-    );
-    const int initial_height = std::min(
-        MulDiv(720, system_dpi, 96),
-        available_height * 92 / 100
-    );
-    const int initial_x =
-        work_area.left + (available_width - initial_width) / 2;
-    const int initial_y =
-        work_area.top + (available_height - initial_height) / 2;
-
     const HWND window = CreateWindowExW(
         0U,
         class_name,
         L"Orkela — Truth-aware media",
         WS_OVERLAPPEDWINDOW,
-        initial_x,
-        initial_y,
-        initial_width,
-        initial_height,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        1120,
+        720,
         nullptr,
         nullptr,
         instance,
@@ -1750,6 +1727,36 @@ int WINAPI wWinMain(
         CoUninitialize();
         return 1;
     }
+
+    // CreateWindowEx receives physical pixels for a per-monitor-aware process.
+    // Resize only after Windows has selected a monitor and assigned its DPI,
+    // then clamp to that monitor's work area so 200% displays remain usable.
+    MONITORINFO monitor_info{sizeof(MONITORINFO)};
+    GetMonitorInfoW(
+        MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+        &monitor_info
+    );
+    const RECT work_area = monitor_info.rcWork;
+    const int available_width = work_area.right - work_area.left;
+    const int available_height = work_area.bottom - work_area.top;
+    const UINT window_dpi = GetDpiForWindow(window);
+    const int initial_width = std::min(
+        MulDiv(1120, window_dpi, 96),
+        available_width * 92 / 100
+    );
+    const int initial_height = std::min(
+        MulDiv(720, window_dpi, 96),
+        available_height * 92 / 100
+    );
+    SetWindowPos(
+        window,
+        nullptr,
+        work_area.left + (available_width - initial_width) / 2,
+        work_area.top + (available_height - initial_height) / 2,
+        initial_width,
+        initial_height,
+        SWP_NOACTIVATE | SWP_NOZORDER
+    );
 
     ShowWindow(window, show_command);
     UpdateWindow(window);
