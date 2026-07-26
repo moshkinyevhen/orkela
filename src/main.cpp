@@ -42,7 +42,7 @@ constexpr UINT animation_timer_id = 1U;
 constexpr UINT animation_interval_ms = 16U;
 constexpr float design_dpi = 96.0F;
 constexpr std::size_t spectrum_bar_count = 24U;
-constexpr std::size_t command_page_count = 8U;
+constexpr std::size_t command_page_count = 12U;
 
 enum class command_page : std::size_t {
     overview,
@@ -51,7 +51,11 @@ enum class command_page : std::size_t {
     visuals,
     video,
     subtitles,
+    library,
     interface_page,
+    performance,
+    privacy,
+    hotkeys,
     advanced,
 };
 
@@ -83,6 +87,7 @@ struct visual_layout {
 struct command_center_layout {
     D2D1_RECT_F panel;
     D2D1_RECT_F close;
+    D2D1_RECT_F search;
     std::array<D2D1_RECT_F, command_page_count> navigation;
     std::array<D2D1_RECT_F, 6U> actions;
 };
@@ -156,6 +161,9 @@ struct app_state {
     bool decoding = false;
     bool command_center_open = false;
     command_page active_command_page = command_page::overview;
+    std::wstring command_search;
+    std::size_t focused_command_action = 0U;
+    bool command_focus_actions = false;
     std::atomic_bool closing{false};
 };
 
@@ -240,14 +248,21 @@ command_center_layout make_command_center_layout(D2D1_SIZE_F size) {
         panel.right - 410.0F
     );
     std::array<D2D1_RECT_F, command_page_count> navigation{};
+    const float navigation_top = panel.top + 96.0F;
+    const float navigation_step = std::clamp(
+        (panel.bottom - navigation_top - 18.0F)
+            / static_cast<float>(navigation.size()),
+        28.0F,
+        46.0F
+    );
     for (std::size_t index = 0U; index < navigation.size(); ++index) {
-        const float top = panel.top + 96.0F
-            + static_cast<float>(index) * 46.0F;
+        const float top = navigation_top
+            + static_cast<float>(index) * navigation_step;
         navigation[index] = D2D1::RectF(
             navigation_left,
             top,
             navigation_right,
-            top + 38.0F
+            top + std::min(38.0F, navigation_step - 4.0F)
         );
     }
 
@@ -278,6 +293,12 @@ command_center_layout make_command_center_layout(D2D1_SIZE_F size) {
             panel.top + 18.0F,
             panel.right - 18.0F,
             panel.top + 54.0F
+        ),
+        D2D1::RectF(
+            content_left,
+            panel.top + 102.0F,
+            content_right,
+            panel.top + 136.0F
         ),
         navigation,
         actions,
@@ -841,20 +862,20 @@ void draw_skip_icon(
     ) {
         sink->BeginFigure(
             D2D1::Point2F(
-                center_x + direction * 7.0F,
+                center_x - direction * 7.0F,
                 center_y - 10.0F
             ),
             D2D1_FIGURE_BEGIN_FILLED
         );
         sink->AddLine(
             D2D1::Point2F(
-                center_x - direction * 10.0F,
+                center_x + direction * 10.0F,
                 center_y
             )
         );
         sink->AddLine(
             D2D1::Point2F(
-                center_x + direction * 7.0F,
+                center_x - direction * 7.0F,
                 center_y + 10.0F
             )
         );
@@ -873,6 +894,13 @@ struct setting_tile {
     bool locked = false;
 };
 
+struct command_tile_view {
+    setting_tile tile;
+    command_page page = command_page::overview;
+    std::size_t action_index = 0U;
+    bool visible = false;
+};
+
 const std::array<std::wstring, command_page_count> command_navigation = {
     L"✦  Overview",
     L"▶  Playback",
@@ -880,7 +908,11 @@ const std::array<std::wstring, command_page_count> command_navigation = {
     L"▥  Visuals",
     L"▣  Video",
     L"CC  Subtitles",
+    L"≡  Library",
     L"◇  Interface",
+    L"⚡  Performance",
+    L"◆  Privacy",
+    L"⌘  Hotkeys",
     L"⚙  Advanced",
 };
 
@@ -898,8 +930,16 @@ std::wstring command_page_title(command_page page) {
         return L"SceneLith Video";
     case command_page::subtitles:
         return L"Subtitles & Accessibility";
+    case command_page::library:
+        return L"Library";
     case command_page::interface_page:
         return L"Interface";
+    case command_page::performance:
+        return L"Performance";
+    case command_page::privacy:
+        return L"Privacy";
+    case command_page::hotkeys:
+        return L"Hotkeys";
     case command_page::advanced:
         return L"Advanced & Trust";
     }
@@ -920,20 +960,31 @@ std::wstring command_page_description(command_page page) {
         return L"Prepared for the independent SceneLith decoder.";
     case command_page::subtitles:
         return L"Readable, synchronized, multilingual presentation.";
+    case command_page::library:
+        return L"Queues, history, bookmarks, and local media organization.";
     case command_page::interface_page:
         return L"Motion, density, DPI, theme, and interaction.";
+    case command_page::performance:
+        return L"Bounded decode, responsive presentation, and device budgets.";
+    case command_page::privacy:
+        return L"Local-first playback with explicit storage and network rules.";
+    case command_page::hotkeys:
+        return L"Fast keyboard control with no hidden global interception.";
     case command_page::advanced:
         return L"Decoder integrity, offline guarantees, and diagnostics.";
     }
     return {};
 }
 
-std::array<setting_tile, 6U> command_tiles(const app_state* state) {
+std::array<setting_tile, 6U> command_tiles(
+    const app_state* state,
+    command_page page
+) {
     const auto& preferences = state->preferences;
     const auto toggle_value = [](bool value) {
         return value ? std::wstring(L"ON") : std::wstring(L"OFF");
     };
-    switch (state->active_command_page) {
+    switch (page) {
     case command_page::overview:
         return {{
             {
@@ -1138,6 +1189,15 @@ std::array<setting_tile, 6U> command_tiles(const app_state* state) {
             {L"Position", L"Safe-area alignment and collision avoidance.", L"PLANNED"},
             {L"Live captions", L"Optional non-Truth local accessibility layer.", L"RESEARCH"},
         }};
+    case command_page::library:
+        return {{
+            {L"Play queue", L"Ordered media session with gapless hand-off.", L"PLANNED"},
+            {L"Recent media", L"Local history with an explicit clear control.", L"PLANNED"},
+            {L"Bookmarks", L"Named positions stored outside codec Truth.", L"PLANNED"},
+            {L"Folder library", L"Opt-in local indexing without cloud upload.", L"PLANNED"},
+            {L"Metadata", L"Canonical title, artist, artwork, and provenance.", L"PLANNED"},
+            {L"Session files", L"Portable synchronized playlists use .orka.", L"PLANNED"},
+        }};
     case command_page::interface_page:
         return {{
             {
@@ -1159,6 +1219,68 @@ std::array<setting_tile, 6U> command_tiles(const app_state* state) {
             {L"Compact mode", L"Reduced chrome for small desktop windows.", L"PLANNED"},
             {L"Global hotkeys", L"System-wide transport controls.", L"PLANNED"},
             {L"Language", L"Localized UI with invariant format terminology.", L"PLANNED"},
+        }};
+    case command_page::performance:
+        return {{
+            {
+                L"Background decode",
+                L"Long media is prepared outside the Windows message loop.",
+                L"ACTIVE",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Bounded input",
+                L"Preflight caps file, sample, channel, and duration resources.",
+                L"LOCKED ON",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Presentation cadence",
+                L"Visual refresh yields to a coarse idle cadence.",
+                L"ADAPTIVE",
+                false,
+                true,
+                true,
+            },
+            {L"Streaming decode", L"Bounded ring-buffer playback for long media.", L"PENDING CORE"},
+            {L"Hardware telemetry", L"Per-stage CPU, memory, and deadline evidence.", L"PLANNED"},
+            {L"Energy profile", L"Mobile thermal and sustained-power constraints.", L"RESEARCH"},
+        }};
+    case command_page::privacy:
+        return {{
+            {
+                L"Offline playback",
+                L"No runtime network access is required for local media.",
+                L"LOCKED ON",
+                false,
+                true,
+                true,
+            },
+            {
+                L"Local preferences",
+                L"Settings remain in the current Windows user profile.",
+                L"LOCAL ONLY",
+                false,
+                true,
+                true,
+            },
+            {L"Recent-media storage", L"Disabled until the library has a clear-history control.", L"NOT STORED"},
+            {L"Network sources", L"Explicit per-source consent and trust policy.", L"PLANNED"},
+            {L"Usage analytics", L"No telemetry exists in this release.", L"OFF", false, true, true},
+            {L"Credential vault", L"OS-protected credentials for future streams.", L"PLANNED"},
+        }};
+    case command_page::hotkeys:
+        return {{
+            {L"Play / pause", L"Toggle the active playback session.", L"SPACE", false, true, true},
+            {L"Seek backward", L"Use the configured navigation interval.", L"LEFT", false, true, true},
+            {L"Seek forward", L"Use the configured navigation interval.", L"RIGHT", false, true, true},
+            {L"Open media", L"Open the bounded local-media picker.", L"CTRL+O", false, true, true},
+            {L"Command Center", L"Open settings and command search.", L"CTRL+,", false, true, true},
+            {L"Global hotkeys", L"System-wide interception remains opt-in.", L"PLANNED"},
         }};
     case command_page::advanced:
         return {{
@@ -1211,6 +1333,88 @@ std::array<setting_tile, 6U> command_tiles(const app_state* state) {
         }};
     }
     return {};
+}
+
+bool setting_matches(
+    const setting_tile& tile,
+    command_page page,
+    const std::wstring& query
+) {
+    if (query.empty()) {
+        return true;
+    }
+    const std::wstring searchable = lowercase(
+        command_page_title(page)
+        + L" "
+        + tile.title
+        + L" "
+        + tile.detail
+        + L" "
+        + tile.value
+    );
+    return searchable.find(lowercase(query)) != std::wstring::npos;
+}
+
+std::array<command_tile_view, 6U> visible_command_tiles(
+    const app_state* state
+) {
+    std::array<command_tile_view, 6U> visible{};
+    std::size_t output_index = 0U;
+
+    const auto append_page = [&](command_page page) {
+        const auto tiles = command_tiles(state, page);
+        for (
+            std::size_t action_index = 0U;
+            action_index < tiles.size() && output_index < visible.size();
+            ++action_index
+        ) {
+            if (!setting_matches(
+                    tiles[action_index],
+                    page,
+                    state->command_search
+                )) {
+                continue;
+            }
+            setting_tile result = tiles[action_index];
+            if (!state->command_search.empty()) {
+                result.detail =
+                    command_page_title(page) + L" · " + result.detail;
+            }
+            visible[output_index] = {
+                std::move(result),
+                page,
+                action_index,
+                true,
+            };
+            ++output_index;
+        }
+    };
+
+    if (state->command_search.empty()) {
+        append_page(state->active_command_page);
+    } else {
+        for (
+            std::size_t page_index = 0U;
+            page_index < command_page_count && output_index < visible.size();
+            ++page_index
+        ) {
+            append_page(static_cast<command_page>(page_index));
+        }
+    }
+
+    if (output_index == 0U) {
+        visible[0] = {
+            {
+                L"No matching setting",
+                L"Try a capability, category, status, or keyboard command.",
+                L"NO RESULTS",
+            },
+            command_page::overview,
+            0U,
+            true,
+        };
+    }
+    return visible;
 }
 
 void draw_toggle(
@@ -1316,6 +1520,8 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
     for (std::size_t index = 0U; index < layout.navigation.size(); ++index) {
         const bool selected =
             index == static_cast<std::size_t>(state->active_command_page);
+        const bool keyboard_focused =
+            !state->command_focus_actions && selected;
         const bool hovered = state->mouse_inside
             && contains(layout.navigation[index], state->mouse);
         if (selected || hovered) {
@@ -1325,6 +1531,13 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
                 graphics.accent_soft.Get()
             );
             graphics.accent_soft->SetOpacity(1.0F);
+        }
+        if (keyboard_focused) {
+            target->DrawRoundedRectangle(
+                D2D1::RoundedRect(layout.navigation[index], 12.0F, 12.0F),
+                graphics.accent.Get(),
+                1.2F
+            );
         }
         draw_text(
             target,
@@ -1345,7 +1558,9 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
     const float content_left = layout.actions[0].left;
     draw_text(
         target,
-        command_page_title(state->active_command_page),
+        state->command_search.empty()
+            ? command_page_title(state->active_command_page)
+            : L"Search results",
         graphics.headline_format.Get(),
         D2D1::RectF(
             content_left,
@@ -1357,7 +1572,9 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
     );
     draw_text(
         target,
-        command_page_description(state->active_command_page),
+        state->command_search.empty()
+            ? command_page_description(state->active_command_page)
+            : L"Live results across every Command Center category.",
         graphics.body_format.Get(),
         D2D1::RectF(
             content_left + 2.0F,
@@ -1367,27 +1584,83 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
         ),
         graphics.text_secondary.Get()
     );
+    graphics.accent_soft->SetOpacity(
+        state->command_search.empty() ? 0.22F : 0.42F
+    );
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(layout.search, 12.0F, 12.0F),
+        graphics.accent_soft.Get()
+    );
+    graphics.accent_soft->SetOpacity(1.0F);
+    target->DrawRoundedRectangle(
+        D2D1::RoundedRect(layout.search, 12.0F, 12.0F),
+        state->command_search.empty()
+            ? graphics.panel_edge.Get()
+            : graphics.accent.Get(),
+        state->command_search.empty() ? 0.8F : 1.2F
+    );
+    target->DrawEllipse(
+        D2D1::Ellipse(
+            D2D1::Point2F(layout.search.left + 18.0F, layout.search.top + 16.0F),
+            5.0F,
+            5.0F
+        ),
+        graphics.accent.Get(),
+        1.5F
+    );
+    target->DrawLine(
+        D2D1::Point2F(layout.search.left + 22.0F, layout.search.top + 20.0F),
+        D2D1::Point2F(layout.search.left + 27.0F, layout.search.top + 25.0F),
+        graphics.accent.Get(),
+        1.5F
+    );
+    const std::wstring search_text = state->command_search.empty()
+        ? L"Search every setting — just type"
+        : state->command_search + L"│";
     draw_text(
         target,
-        L"LIVE SETTINGS  ·  0.2.0-alpha.2",
+        search_text,
+        graphics.button_format.Get(),
+        D2D1::RectF(
+            layout.search.left + 38.0F,
+            layout.search.top + 8.0F,
+            layout.search.right - 226.0F,
+            layout.search.bottom
+        ),
+        state->command_search.empty()
+            ? graphics.text_secondary.Get()
+            : graphics.text_primary.Get()
+    );
+    draw_text(
+        target,
+        L"TYPE TO SEARCH  ·  ESC TO CLEAR",
         graphics.label_format.Get(),
         D2D1::RectF(
-            content_left + 2.0F,
-            layout.panel.top + 108.0F,
-            layout.panel.right - 24.0F,
-            layout.panel.top + 132.0F
+            layout.search.right - 220.0F,
+            layout.search.top + 9.0F,
+            layout.search.right - 12.0F,
+            layout.search.bottom
         ),
         graphics.accent.Get()
     );
 
-    const auto tiles = command_tiles(state);
+    const auto tiles = visible_command_tiles(state);
     for (std::size_t index = 0U; index < tiles.size(); ++index) {
-        const auto& tile = tiles[index];
+        const auto& tile_view = tiles[index];
+        if (!tile_view.visible) {
+            continue;
+        }
+        const auto& tile = tile_view.tile;
         const D2D1_RECT_F rectangle = layout.actions[index];
         const bool hovered = tile.interactive
             && state->mouse_inside
             && contains(rectangle, state->mouse);
-        graphics.panel_edge->SetOpacity(hovered ? 0.86F : 0.40F);
+        const bool keyboard_focused =
+            state->command_focus_actions
+            && index == state->focused_command_action;
+        graphics.panel_edge->SetOpacity(
+            hovered || keyboard_focused ? 0.86F : 0.40F
+        );
         target->FillRoundedRectangle(
             D2D1::RoundedRect(rectangle, 16.0F, 16.0F),
             graphics.panel_edge.Get()
@@ -1395,8 +1668,10 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
         graphics.panel_edge->SetOpacity(1.0F);
         target->DrawRoundedRectangle(
             D2D1::RoundedRect(rectangle, 16.0F, 16.0F),
-            hovered ? graphics.accent.Get() : graphics.panel_edge.Get(),
-            hovered ? 1.4F : 0.8F
+            hovered || keyboard_focused
+                ? graphics.accent.Get()
+                : graphics.panel_edge.Get(),
+            hovered || keyboard_focused ? 1.4F : 0.8F
         );
         target->FillEllipse(
             D2D1::Ellipse(
@@ -2232,9 +2507,13 @@ void cycle_listening_level(app_state* state) {
     state->player.set_volume(state->volume);
 }
 
-void activate_command_tile(app_state* state, std::size_t index) {
+void activate_command_tile(
+    app_state* state,
+    command_page page,
+    std::size_t index
+) {
     auto& preferences = state->preferences;
-    switch (state->active_command_page) {
+    switch (page) {
     case command_page::overview:
         if (index == 0U) {
             preferences.autoplay_on_open = !preferences.autoplay_on_open;
@@ -2304,6 +2583,10 @@ void activate_command_tile(app_state* state, std::size_t index) {
         break;
     case command_page::video:
     case command_page::subtitles:
+    case command_page::library:
+    case command_page::performance:
+    case command_page::privacy:
+    case command_page::hotkeys:
         return;
     }
     save_session_preferences(state);
@@ -2317,6 +2600,7 @@ bool handle_command_center_click(
 ) {
     if (contains(base_layout.command, point)) {
         state->command_center_open = !state->command_center_open;
+        state->command_focus_actions = false;
         invalidate(state);
         return true;
     }
@@ -2328,6 +2612,8 @@ bool handle_command_center_click(
     );
     if (contains(layout.close, point)) {
         state->command_center_open = false;
+        state->command_search.clear();
+        state->command_focus_actions = false;
         invalidate(state);
         return true;
     }
@@ -2335,17 +2621,26 @@ bool handle_command_center_click(
         if (contains(layout.navigation[index], point)) {
             state->active_command_page =
                 static_cast<command_page>(index);
+            state->command_search.clear();
+            state->command_focus_actions = false;
             invalidate(state);
             return true;
         }
     }
-    const auto tiles = command_tiles(state);
+    const auto tiles = visible_command_tiles(state);
     for (std::size_t index = 0U; index < layout.actions.size(); ++index) {
         if (
-            tiles[index].interactive
+            tiles[index].visible
+            && tiles[index].tile.interactive
             && contains(layout.actions[index], point)
         ) {
-            activate_command_tile(state, index);
+            state->command_focus_actions = true;
+            state->focused_command_action = index;
+            activate_command_tile(
+                state,
+                tiles[index].page,
+                tiles[index].action_index
+            );
             return true;
         }
     }
@@ -2572,25 +2867,112 @@ LRESULT CALLBACK window_procedure(
             && (GetKeyState(VK_CONTROL) < 0)
         ) {
             state->command_center_open = !state->command_center_open;
+            state->command_focus_actions = false;
+            if (!state->command_center_open) {
+                state->command_search.clear();
+            }
             invalidate(state);
         } else if (
             state->command_center_open
             && word == VK_ESCAPE
         ) {
-            state->command_center_open = false;
+            if (!state->command_search.empty()) {
+                state->command_search.clear();
+                state->focused_command_action = 0U;
+                state->command_focus_actions = false;
+            } else {
+                state->command_center_open = false;
+            }
+            invalidate(state);
+        } else if (
+            state->command_center_open
+            && word == VK_TAB
+        ) {
+            state->command_focus_actions = !state->command_focus_actions;
+            state->focused_command_action = 0U;
             invalidate(state);
         } else if (
             state->command_center_open
             && (word == VK_UP || word == VK_DOWN)
         ) {
-            const std::size_t current =
-                static_cast<std::size_t>(state->active_command_page);
-            const std::size_t next = word == VK_DOWN
-                ? (current + 1U) % command_page_count
-                : (current + command_page_count - 1U)
-                    % command_page_count;
-            state->active_command_page = static_cast<command_page>(next);
+            if (state->command_focus_actions) {
+                const auto tiles = visible_command_tiles(state);
+                std::size_t visible_count = 0U;
+                for (const auto& tile : tiles) {
+                    visible_count += tile.visible ? 1U : 0U;
+                }
+                if (word == VK_UP) {
+                    state->focused_command_action =
+                        state->focused_command_action >= 2U
+                            ? state->focused_command_action - 2U
+                            : 0U;
+                } else if (
+                    state->focused_command_action + 2U < visible_count
+                ) {
+                    state->focused_command_action += 2U;
+                }
+            } else {
+                const std::size_t current =
+                    static_cast<std::size_t>(state->active_command_page);
+                const std::size_t next = word == VK_DOWN
+                    ? (current + 1U) % command_page_count
+                    : (current + command_page_count - 1U)
+                        % command_page_count;
+                state->active_command_page = static_cast<command_page>(next);
+                state->command_search.clear();
+            }
             invalidate(state);
+        } else if (
+            state->command_center_open
+            && (word == VK_LEFT || word == VK_RIGHT)
+        ) {
+            if (!state->command_focus_actions) {
+                if (word == VK_RIGHT) {
+                    state->command_focus_actions = true;
+                    state->focused_command_action = 0U;
+                }
+            } else {
+                const auto tiles = visible_command_tiles(state);
+                std::size_t visible_count = 0U;
+                for (const auto& tile : tiles) {
+                    visible_count += tile.visible ? 1U : 0U;
+                }
+                if (
+                    word == VK_LEFT
+                    && state->focused_command_action == 0U
+                ) {
+                    state->command_focus_actions = false;
+                } else if (
+                    word == VK_LEFT
+                    && state->focused_command_action > 0U
+                ) {
+                    --state->focused_command_action;
+                } else if (
+                    word == VK_RIGHT
+                    && state->focused_command_action + 1U < visible_count
+                ) {
+                    ++state->focused_command_action;
+                }
+            }
+            invalidate(state);
+        } else if (
+            state->command_center_open
+            && state->command_focus_actions
+            && (word == VK_RETURN || word == VK_SPACE)
+        ) {
+            const auto tiles = visible_command_tiles(state);
+            const std::size_t index = state->focused_command_action;
+            if (
+                index < tiles.size()
+                && tiles[index].visible
+                && tiles[index].tile.interactive
+            ) {
+                activate_command_tile(
+                    state,
+                    tiles[index].page,
+                    tiles[index].action_index
+                );
+            }
         } else if (state->command_center_open) {
             return 0;
         } else if (word == VK_SPACE) {
@@ -2615,6 +2997,32 @@ LRESULT CALLBACK window_procedure(
             invalidate(state);
         } else if (word == L'O' && (GetKeyState(VK_CONTROL) < 0)) {
             choose_file(state);
+        }
+        return 0;
+    case WM_CHAR:
+        if (
+            state != nullptr
+            && state->command_center_open
+            && GetKeyState(VK_CONTROL) >= 0
+            && GetKeyState(VK_MENU) >= 0
+        ) {
+            if (word == L'\b') {
+                if (!state->command_search.empty()) {
+                    state->command_search.pop_back();
+                }
+            } else if (
+                word >= 32U
+                && word != 127U
+                && state->command_search.size() < 64U
+            ) {
+                state->command_search.push_back(
+                    static_cast<wchar_t>(word)
+                );
+            }
+            state->command_focus_actions =
+                !state->command_search.empty();
+            state->focused_command_action = 0U;
+            invalidate(state);
         }
         return 0;
     case WM_DROPFILES: {
