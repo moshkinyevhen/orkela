@@ -1,0 +1,196 @@
+name: Public reference Opus comparison
+
+on:
+  workflow_dispatch:
+    inputs:
+      speech_target_bytes:
+        description: Complete Resonith speech bytes
+        required: true
+        default: "17929"
+      mozart_target_bytes:
+        description: Complete Resonith Mozart bytes; zero skips Mozart
+        required: true
+        default: "0"
+
+permissions:
+  contents: read
+
+jobs:
+  encode:
+    runs-on: ubuntu-24.04
+    env:
+      SPEECH_TARGET_BYTES: ${{ inputs.speech_target_bytes }}
+      MOZART_TARGET_BYTES: ${{ inputs.mozart_target_bytes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and source-conversion prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            autoconf automake build-essential libflac-dev libogg-dev \
+            libtool pkg-config python3-pip
+          python3 -m pip install --break-system-packages soundfile==0.13.1
+
+      - name: Build official Opus 1.6.1 encoder stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/opus-source"
+          prefix="$RUNNER_TEMP/opus-prefix"
+          mkdir -p "$source_dir" "$prefix"
+          cd "$source_dir"
+
+          curl --fail --location --retry 3 \
+            --output opus-1.6.1.tar.gz \
+            https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          echo \
+            "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1  opus-1.6.1.tar.gz" \
+            | sha256sum --check
+
+          curl --fail --location --retry 3 \
+            --output libopusenc-0.3.tar.gz \
+            https://downloads.xiph.org/releases/opus/libopusenc-0.3.tar.gz
+          echo \
+            "f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c  libopusenc-0.3.tar.gz" \
+            | sha256sum --check
+
+          curl --fail --location --retry 3 \
+            --output opusfile-0.12.tar.gz \
+            https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz
+          echo \
+            "118d8601c12dd6a44f52423e68ca9083cc9f2bfe72da7a8c1acb22a80ae3550b  opusfile-0.12.tar.gz" \
+            | sha256sum --check
+
+          curl --fail --location --retry 3 \
+            --output opus-tools-0.2.tar.gz \
+            https://downloads.xiph.org/releases/opus/opus-tools-0.2.tar.gz
+          echo \
+            "b4e56cb00d3e509acfba9a9b627ffd8273b876b4e2408642259f6da28fa0ff86  opus-tools-0.2.tar.gz" \
+            | sha256sum --check
+
+          tar -xf opus-1.6.1.tar.gz
+          tar -xf libopusenc-0.3.tar.gz
+          tar -xf opusfile-0.12.tar.gz
+          tar -xf opus-tools-0.2.tar.gz
+
+          cd "$source_dir/opus-1.6.1"
+          ./configure --prefix="$prefix" --disable-shared --enable-static
+          make --jobs=2
+          make install
+
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+          export CPPFLAGS="-I$prefix/include"
+          export LDFLAGS="-L$prefix/lib"
+
+          cd "$source_dir/libopusenc-0.3"
+          ./configure --prefix="$prefix" --disable-shared --enable-static
+          make --jobs=2
+          make install
+
+          cd "$source_dir/opusfile-0.12"
+          ./configure \
+            --prefix="$prefix" \
+            --disable-shared \
+            --enable-static \
+            --disable-http
+          make --jobs=2
+          make install
+
+          cd "$source_dir/opus-tools-0.2"
+          ./configure --prefix="$prefix"
+          make --jobs=2
+
+          echo "OPUSENC=$source_dir/opus-tools-0.2/opusenc" \
+            >> "$GITHUB_ENV"
+          echo "OPUSDEC=$source_dir/opus-tools-0.2/opusdec" \
+            >> "$GITHUB_ENV"
+          "$source_dir/opus-tools-0.2/opusenc" --version
+
+      - name: Prepare byte-identical PCM16 reference WAV files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p comparison/source
+          curl --fail --location --retry 5 \
+            --output comparison/source/speech.flac \
+            https://raw.githubusercontent.com/QwenLM/Qwen-Audio/main/assets/audio/1272-128104-0000.flac
+          echo \
+            "4e25e22555cd16e90edb0a3b49fdcf1fe652b2a1250ab643634db33895c75b41  comparison/source/speech.flac" \
+            | sha256sum --check
+
+          if [[ "$MOZART_TARGET_BYTES" != "0" ]]; then
+            curl --fail --location --retry 5 \
+              --output comparison/source/mozart.flac \
+              "https://archive.org/download/MusopenCollectionAsFlac/Mozart_MagicFluteOverture/WolfgangAmadeusMozart-MagicFluteOverture.flac"
+            echo \
+              "d0482d54438d784ab6c0ff2d2279e10fa821f7b6fec9f7da43bfed5701cb25ac  comparison/source/mozart.flac" \
+              | sha256sum --check
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import soundfile as sf
+
+          root = Path("comparison")
+          names = ["speech"]
+          if os.environ["MOZART_TARGET_BYTES"] != "0":
+              names.append("mozart")
+          for name in names:
+              pcm, rate = sf.read(
+                  root / "source" / f"{name}.flac",
+                  dtype="int16",
+                  always_2d=True,
+              )
+              sf.write(
+                  root / f"{name}-original.wav",
+                  pcm,
+                  rate,
+                  subtype="PCM_16",
+              )
+          PY
+          echo \
+            "799f78ed4beb4de7ceae3a809262d4ce242394342ccd1d58cef7d49dbc2def46  comparison/speech-original.wav" \
+            | sha256sum --check
+          if [[ "$MOZART_TARGET_BYTES" != "0" ]]; then
+            echo \
+              "f9bcc829c8c61e850c8a15d7d25ec600a904b2041ed3bb4d9e13131ea30a5a6f  comparison/mozart-original.wav" \
+              | sha256sum --check
+          fi
+
+      - name: Match complete Opus bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/match_opus.py \
+            --encoder "$OPUSENC" \
+            --decoder "$OPUSDEC" \
+            --source comparison/speech-original.wav \
+            --target-bytes "$SPEECH_TARGET_BYTES" \
+            --mode speech \
+            --output comparison/speech-opus-1.6.1.opus \
+            --decoded comparison/speech-opus-decoded.wav \
+            --report comparison/speech-opus-report.json
+
+          if [[ "$MOZART_TARGET_BYTES" != "0" ]]; then
+            python3 tools/match_opus.py \
+              --encoder "$OPUSENC" \
+              --decoder "$OPUSDEC" \
+              --source comparison/mozart-original.wav \
+              --target-bytes "$MOZART_TARGET_BYTES" \
+              --mode music \
+              --output comparison/mozart-opus-1.6.1.opus \
+              --decoded comparison/mozart-opus-decoded.wav \
+              --report comparison/mozart-opus-report.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-reference-opus-comparison
+          path: |
+            comparison/*-original.wav
+            comparison/*.opus
+            comparison/*-opus-decoded.wav
+            comparison/*-opus-report.json
+          if-no-files-found: error

@@ -60,7 +60,8 @@ The executable is `build/Release/Orkela.exe`. To register the three canonical
 extensions for the current Windows user without administrator access:
 
 ```powershell
-.\tools\Register-Orkela.ps1 `
+powershell -ExecutionPolicy Bypass `
+  -File .\tools\Register-Orkela.ps1 `
   -ExePath .\build\Release\Orkela.exe
 ```
 
