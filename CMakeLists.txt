@@ -41,7 +41,8 @@ add_executable(Orkela WIN32
     src/resonith_file.h
     src/wave_player.cpp
     src/wave_player.h
-    resources/orkela.manifest
+    resources/orkela.rc
+    resources/resource.h
 )
 
 target_compile_features(Orkela PRIVATE cxx_std_20)
@@ -58,8 +59,14 @@ target_link_libraries(
     PRIVATE
         Resonith::Core
         comdlg32
+        d2d1
+        dwrite
+        dwmapi
+        ole32
         shell32
+        uxtheme
         winmm
+        windowscodecs
 )
 set_target_properties(Orkela PROPERTIES CXX_EXTENSIONS OFF)
 

@@ -1,0 +1,7 @@
+#ifndef ORKELA_RESOURCE_H
+#define ORKELA_RESOURCE_H
+
+#define IDI_ORKELA 101
+#define IDR_ORKELA_MARK 102
+
+#endif

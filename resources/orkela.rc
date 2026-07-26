@@ -1,0 +1,5 @@
+#include "resource.h"
+
+IDI_ORKELA ICON "orkela.ico"
+IDR_ORKELA_MARK RCDATA "orkela-mark.png"
+1 RT_MANIFEST "orkela.manifest"
