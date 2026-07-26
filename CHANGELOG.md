@@ -7,6 +7,10 @@ release links to reproducible QA evidence and identifies the exact executable.
 
 ### Planned
 
+- Complete the release-blocking Premium Command Center goal: global setting
+  search, keyboard-only navigation, full category coverage, premium motion and
+  focus states, persisted working controls, and explicit status labels for
+  capabilities that do not yet have a backend.
 - Streaming Resonith decode, playlists, and portable media/session adapters.
 
 ## [0.2.0-alpha.2] - 2026-07-26

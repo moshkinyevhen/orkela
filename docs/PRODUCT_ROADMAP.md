@@ -12,6 +12,10 @@ Deliver a settings and control experience that is faster to understand than a
 traditional desktop menu while exposing at least the same major capability
 classes expected from a mature player.
 
+This is the immediate product goal. Do not tag `0.2.0-alpha.2` until the
+Command Center, its real settings, and its release evidence satisfy this
+milestone.
+
 The milestone requires:
 
 - an authored icon-led Command Center with premium depth, focus, hover,
@@ -26,6 +30,23 @@ The milestone requires:
 - no presentation setting may alter Resonith Truth reference state;
 - visual QA at 100%, 150%, and 200% DPI, minimum size, constrained work area,
   keyboard-only use, and reduced-motion mode.
+
+### Next implementation step
+
+Complete the Command Center before any additional codec-facing player work:
+
+1. finish the premium icon-led shell, transitions, focus states, and compact
+   quick controls;
+2. add global setting search and complete keyboard-only navigation;
+3. expose the full category map: Playback, Audio, Video, Subtitles, Library,
+   Interface, Performance, Privacy, Hotkeys, and Advanced;
+4. connect every currently available preference to real persisted behavior;
+5. mark unavailable capabilities visibly as `PLANNED`, `RESEARCH`, or
+   `PENDING CORE` instead of presenting inert controls;
+6. compare capability coverage against the documented VLC preference and
+   playback-control surface, then preserve only settings that are meaningful
+   to Orkela's architecture;
+7. pass the complete O-2 release gate before tagging `0.2.0-alpha.2`.
 
 ### Release gate
 
