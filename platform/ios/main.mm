@@ -223,7 +223,7 @@ UIButton* orkela_button(NSString* title) {
 - (void)openDocument {
     UTType* resonith = [UTType typeWithIdentifier:@"org.scenelith.resonith"];
     NSArray<UTType*>* types = resonith == nil
-        ? @[[UTType data]]
+        ? @[UTTypeData]
         : @[resonith];
     UIDocumentPickerViewController* picker =
         [[UIDocumentPickerViewController alloc]
