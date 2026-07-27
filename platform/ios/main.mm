@@ -26,13 +26,15 @@ UIColor* orkela_color(
 
 UIButton* orkela_button(NSString* title) {
     UIButton* button = [UIButton buttonWithType:UIButtonTypeSystem];
-    [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.titleLabel.font =
-        [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = orkela_color(0.17, 0.15, 0.26);
-    button.layer.cornerRadius = 18.0;
-    button.contentEdgeInsets = UIEdgeInsetsMake(14.0, 24.0, 14.0, 24.0);
+    UIButtonConfiguration* configuration =
+        [UIButtonConfiguration filledButtonConfiguration];
+    configuration.title = title;
+    configuration.baseForegroundColor = UIColor.whiteColor;
+    configuration.baseBackgroundColor = orkela_color(0.17, 0.15, 0.26);
+    configuration.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+    configuration.contentInsets =
+        NSDirectionalEdgeInsetsMake(14.0, 24.0, 14.0, 24.0);
+    button.configuration = configuration;
     return button;
 }
 
@@ -221,7 +223,7 @@ UIButton* orkela_button(NSString* title) {
 - (void)openDocument {
     UTType* resonith = [UTType typeWithIdentifier:@"org.scenelith.resonith"];
     NSArray<UTType*>* types = resonith == nil
-        ? @[UTType.data]
+        ? @[[UTType data]]
         : @[resonith];
     UIDocumentPickerViewController* picker =
         [[UIDocumentPickerViewController alloc]
@@ -272,7 +274,7 @@ UIButton* orkela_button(NSString* title) {
                 begin,
                 begin + static_cast<std::size_t>(data.length)
             );
-            auto decoded = std::make_unique<orkela::decoded_audio>();
+            auto decoded = std::make_shared<orkela::decoded_audio>();
             std::string error;
             if (
                 !orkela::decode_resonith_bytes(
@@ -286,14 +288,14 @@ UIButton* orkela_button(NSString* title) {
                 return;
             }
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self installDecodedAudio:std::move(decoded) name:name];
+                [self installDecodedAudio:decoded name:name];
             });
         }
     );
 }
 
 - (void)installDecodedAudio:
-            (std::unique_ptr<orkela::decoded_audio>)decoded
+            (std::shared_ptr<orkela::decoded_audio>)decoded
                        name:(NSString*)name {
     self.decoding = NO;
     if (
@@ -446,7 +448,8 @@ UIButton* orkela_button(NSString* title) {
         self.decoding = NO;
         [self stopEngine];
         self.statusLabel.text = [@"Playback failed: "
-            stringByAppendingString:message ?: @"unknown error"];
+            stringByAppendingString:
+                (message != nil ? message : @"unknown error")];
     });
 }
 
