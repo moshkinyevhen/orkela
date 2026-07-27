@@ -1,8 +1,9 @@
 # Orkela
 
 Orkela is a native media player for the SceneLith ecosystem. It plays real
-**Resonith** audio on Windows by calling the public Resonith Core decoder and
-sending reconstructed PCM directly to the Windows audio device.
+**Resonith** audio on Windows, Android, and iOS by calling the public Resonith
+Core decoder and sending reconstructed PCM directly to the operating system's
+audio API.
 
 Current version: **0.2.0-alpha.2**.
 
@@ -33,7 +34,7 @@ an unavailable decoder.
 
 ## Current milestone
 
-- native C++20 and Win32;
+- shared strict C++23 session/core with native platform shells;
 - DPI-aware Direct2D/DirectWrite interface with a PCM-derived spectrum;
 - open, play/pause, stop, seek, skip, volume, keyboard controls, and
   file drag-and-drop;
@@ -41,6 +42,13 @@ an unavailable decoder.
 - responsive background preflight/decode for long-form media;
 - mono and stereo PCM16 output through the Windows multimedia device;
 - no runtime network access and no external codec process.
+
+The first Android APK and iOS application bundle now share the same
+allocation-bounded Resonith pull session. Android streams packet PCM through
+JNI to `AudioTrack`; iOS performs background decode and schedules PCM through
+`AVAudioEngine`. See
+[Platform Architecture](docs/PLATFORM_ARCHITECTURE.md) for the exact
+responsibility split and mandatory build matrix.
 
 This milestone decodes a complete research clip into bounded application
 memory before playback. Streaming decode, playlists, mobile front ends, and
@@ -77,6 +85,22 @@ Requirements:
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
+```
+
+Android uses its pinned Gradle wrapper:
+
+```powershell
+cd platform/android
+.\gradlew.bat :app:assembleDebug
+```
+
+The local APK is
+`platform/android/app/build/outputs/apk/debug/app-debug.apk`. iOS device and
+simulator bundles are built by the checked-in CMake presets on macOS/Xcode:
+
+```bash
+cmake --preset ios-simulator-x86_64
+cmake --build --preset ios-simulator-x86_64
 ```
 
 The executable is `build/Release/Orkela.exe`. To register the three canonical

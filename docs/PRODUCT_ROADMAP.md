@@ -62,10 +62,14 @@ release-evidence report.
 
 ## O-3 — Portable media session
 
-After O-2 passes:
+Status: **IN IMPLEMENTATION**
 
-- streaming Resonith decode and bounded ring-buffer playback;
+- [x] strict C++23 platform-neutral Resonith pull session;
+- [x] Android ARM64/x86-64 JNI package and streaming `AudioTrack` path;
+- [x] iOS device/simulator UIKit package and `AVAudioEngine` path;
+- [ ] bounded cross-platform producer/ring buffer for Windows and iOS;
 - playlist, queue, bookmarks, history, and library adapters;
 - WASAPI output with device selection and gapless transition;
-- portable session core for Windows, Android, iOS, Linux, and macOS;
+- [x] mandatory Windows, Android, and iOS build matrix;
+- [ ] Linux and macOS desktop adapters;
 - first SceneLith video surface when a conforming Core exists.

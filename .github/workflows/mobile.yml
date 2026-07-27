@@ -1,0 +1,98 @@
+name: Mobile
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Select stable NDK r29
+        shell: bash
+        run: |
+          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          if [[ ! -d "$ndk" ]]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+              "ndk;29.0.14206865"
+          fi
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+
+      - name: Build debug APK
+        working-directory: platform/android
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          apk="platform/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          unzip -t "$apk"
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/liborkela_android.so'
+          unzip -l "$apk" | grep -q 'lib/x86_64/liborkela_android.so'
+          unzip -l "$apk" | grep -q 'assets/emotional-piano.resonith'
+          stat --printf='%n %s bytes\n' "$apk"
+          sha256sum "$apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Orkela-Android-debug
+          path: platform/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  ios:
+    name: ${{ matrix.preset }}
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        preset:
+          - ios-device-arm64
+          - ios-simulator-x86_64
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select stable Xcode
+        shell: bash
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.4.1.app
+          xcodebuild -version
+          cmake --version
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Verify application bundle
+        shell: bash
+        run: |
+          app="$(find "build/${{ matrix.preset }}" \
+            -type d -name OrkelaIOS.app -print -quit)"
+          test -n "$app"
+          test -s "$app/OrkelaIOS"
+          xcrun lipo -info "$app/OrkelaIOS"
+          test -s "$app/emotional-piano.resonith"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app" "Orkela-${{ matrix.preset }}.zip"
+          stat -f '%N %z bytes' "Orkela-${{ matrix.preset }}.zip"
+          shasum -a 256 "Orkela-${{ matrix.preset }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Orkela-${{ matrix.preset }}
+          path: Orkela-${{ matrix.preset }}.zip
+          if-no-files-found: error

@@ -1,0 +1,65 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ios-common",
+      "hidden": true,
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0",
+        "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED": "NO",
+        "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED": "NO",
+        "ORKELA_BUILD_APPLICATIONS": "ON",
+        "ORKELA_WARNINGS_AS_ERRORS": "ON",
+        "RESONITH_BUILD_SHARED": "OFF",
+        "RESONITH_BUILD_TOOLS": "OFF",
+        "RESONITH_BUILD_FUZZERS": "OFF"
+      }
+    },
+    {
+      "name": "ios-device-arm64",
+      "displayName": "Orkela iOS device ARM64",
+      "inherits": "ios-common",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_SYSROOT": "iphoneos"
+      }
+    },
+    {
+      "name": "ios-simulator-x86_64",
+      "displayName": "Orkela iOS simulator x86-64",
+      "inherits": "ios-common",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ios-device-arm64",
+      "configurePreset": "ios-device-arm64",
+      "configuration": "Release",
+      "targets": [
+        "OrkelaIOS"
+      ],
+      "jobs": 4
+    },
+    {
+      "name": "ios-simulator-x86_64",
+      "configurePreset": "ios-simulator-x86_64",
+      "configuration": "Release",
+      "targets": [
+        "OrkelaIOS"
+      ],
+      "jobs": 4
+    }
+  ]
+}

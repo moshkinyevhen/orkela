@@ -2824,8 +2824,10 @@ LRESULT CALLBACK window_procedure(
         const UINT dpi = state == nullptr
             ? GetDpiForWindow(window)
             : static_cast<UINT>(state->dpi);
-        limits->ptMinTrackSize.x = MulDiv(760, dpi, 96);
-        limits->ptMinTrackSize.y = MulDiv(480, dpi, 96);
+        limits->ptMinTrackSize.x =
+            MulDiv(760, static_cast<int>(dpi), 96);
+        limits->ptMinTrackSize.y =
+            MulDiv(480, static_cast<int>(dpi), 96);
         return 0;
     }
     case WM_MOUSEMOVE:
@@ -3228,7 +3230,8 @@ int WINAPI wWinMain(
     // CreateWindowEx receives physical pixels for a per-monitor-aware process.
     // Resize only after Windows has selected a monitor and assigned its DPI,
     // then clamp to that monitor's work area so 200% displays remain usable.
-    MONITORINFO monitor_info{sizeof(MONITORINFO)};
+    MONITORINFO monitor_info{};
+    monitor_info.cbSize = sizeof(MONITORINFO);
     GetMonitorInfoW(
         MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
         &monitor_info
@@ -3238,11 +3241,11 @@ int WINAPI wWinMain(
     const int available_height = work_area.bottom - work_area.top;
     const UINT window_dpi = GetDpiForWindow(window);
     const int initial_width = std::min(
-        MulDiv(1120, window_dpi, 96),
+        MulDiv(1120, static_cast<int>(window_dpi), 96),
         available_width * 92 / 100
     );
     const int initial_height = std::min(
-        MulDiv(720, window_dpi, 96),
+        MulDiv(720, static_cast<int>(window_dpi), 96),
         available_height * 92 / 100
     );
     SetWindowPos(

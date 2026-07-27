@@ -1,7 +1,13 @@
 /build/
+/build-*/
+/artifacts/
 /comparison/
 /out/
 /.vs/
+**/.cxx/
+**/.gradle/
+**/build/
+**/local.properties
 __pycache__/
 *.pyc
 *.user

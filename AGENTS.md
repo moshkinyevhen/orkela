@@ -14,7 +14,9 @@ repositories; Orkela consumes their public APIs.
 
 ## Engineering contract
 
-- C++20 is the implementation language for the portable core and native UI.
+- C++23 is the implementation language for the portable core and native
+  platform adapters. Use only the mobile-safe subset documented in
+  `docs/PLATFORM_ARCHITECTURE.md`.
 - Keep platform code behind narrow adapters so Android, iOS, Linux, macOS, and
   embedded front ends can reuse the media/session layer.
 - Prefer operating-system APIs over a large mandatory GUI framework.
@@ -38,7 +40,8 @@ repositories; Orkela consumes their public APIs.
 
 Before publishing a change:
 
-1. build Windows x64 with warnings as errors;
+1. build Windows x64, Android ARM64/x86-64, and iOS
+   device/simulator with warnings as errors;
 2. run the decoder smoke test against a real LPS5 artifact;
 3. verify playback reads LPS5 directly and creates no WAV;
 4. verify malformed input fails before playback;

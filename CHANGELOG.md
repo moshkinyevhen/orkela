@@ -5,13 +5,33 @@ release links to reproducible QA evidence and identifies the exact executable.
 
 ## [Unreleased]
 
+### Added
+
+- Strict C++23 `Orkela::Session` with bounded Resonith preflight and an
+  allocation-free successful packet-pull path.
+- Native Android application project for ARM64 and x86-64 with direct
+  Resonith JNI decode and streaming PCM16 `AudioTrack` output.
+- Native iOS device and simulator application project with background
+  Resonith decode and `AVAudioEngine` output.
+- Mandatory same-revision Windows, Android, iOS device, and iOS simulator
+  build contract.
+- Pinned Gradle 9.4.1 wrapper, Android Gradle Plugin 9.2.1, SDK 36, NDK r29,
+  and macOS/Xcode CI gates.
+
+### Changed
+
+- Windows file loading is now a narrow adapter over the same portable
+  decoder/session implementation used by mobile builds.
+- The implementation language baseline is C++23 on every native target.
+
 ### Planned
 
 - Complete the release-blocking Premium Command Center goal: global setting
   search, keyboard-only navigation, full category coverage, premium motion and
   focus states, persisted working controls, and explicit status labels for
   capabilities that do not yet have a backend.
-- Streaming Resonith decode, playlists, and portable media/session adapters.
+- Bounded producer/ring-buffer playback on every platform, playlists, and
+  library adapters.
 
 ## [0.2.0-alpha.2] - 2026-07-26
 

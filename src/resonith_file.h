@@ -1,19 +1,12 @@
 #ifndef ORKELA_RESONITH_FILE_H
 #define ORKELA_RESONITH_FILE_H
 
-#include <cstdint>
+#include "orkela/decoded_audio.h"
+
 #include <filesystem>
 #include <string>
-#include <vector>
 
 namespace orkela {
-
-struct decoded_audio {
-    std::uint32_t sample_rate = 0U;
-    std::uint16_t channels = 0U;
-    std::uint32_t frame_count = 0U;
-    std::vector<std::int16_t> samples;
-};
 
 /*
  * Decode one complete LPS4/LPS5 research stream through Resonith Core.
