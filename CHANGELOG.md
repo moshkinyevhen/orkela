@@ -5,7 +5,7 @@ release links to reproducible QA evidence and identifies the exact executable.
 
 ## [Unreleased]
 
-Candidate version: **0.3.0-alpha.1**. Publication remains blocked until the
+Candidate version: **0.3.0-alpha.2**. Publication remains blocked until the
 complete platform and O-2 release-evidence gates pass.
 
 ### Added
@@ -20,12 +20,21 @@ complete platform and O-2 release-evidence gates pass.
   build contract.
 - Pinned Gradle 9.4.1 wrapper, Android Gradle Plugin 9.2.1, SDK 36, NDK r29,
   and macOS/Xcode CI gates.
+- Resonith Core revision `d8245c207ada6cd7a1f72ad595e7edbd933d2da4`,
+  including the bounded integer MAF DSP substrate and its cross-platform
+  conformance fixes.
+- A portable pull-session executable gate that decodes complete streams,
+  verifies timeline/resource bounds, fingerprints PCM, and rejects a
+  deterministic truncation before playback.
 
 ### Changed
 
 - Windows file loading is now a narrow adapter over the same portable
   decoder/session implementation used by mobile builds.
 - The implementation language baseline is C++23 on every native target.
+- The player now identifies the active path as bounded MAF Truth playback.
+  Optional Gemini Foundry analysis remains encoder-side and adds no player
+  network or credential dependency.
 
 ### Planned
 

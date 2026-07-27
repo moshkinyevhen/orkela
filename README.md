@@ -5,7 +5,7 @@ Orkela is a native media player for the SceneLith ecosystem. It plays real
 Core decoder and sending reconstructed PCM directly to the operating system's
 audio API.
 
-Current version: **0.3.0-alpha.1**.
+Current version: **0.3.0-alpha.2**.
 
 `.resonith file -> Resonith Core -> PCM16 -> Windows audio`
 
@@ -39,6 +39,9 @@ an unavailable decoder.
 - open, play/pause, stop, seek, skip, volume, keyboard controls, and
   file drag-and-drop;
 - direct LPS4/LPS5 preflight and decoding through Resonith Core;
+- pinned bounded MAF DSP Core revision `d8245c2`, including deterministic
+  periodic, source-filter, stochastic, transient, Innovation, and mix
+  operations beneath the existing admitted transport;
 - responsive background preflight/decode for long-form media;
 - mono and stereo PCM16 output through the Windows multimedia device;
 - no runtime network access and no external codec process.

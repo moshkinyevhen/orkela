@@ -6,6 +6,7 @@ include(FetchContent)
 
 option(ORKELA_WARNINGS_AS_ERRORS "Treat Orkela warnings as errors" ON)
 option(ORKELA_BUILD_APPLICATIONS "Build available platform applications" ON)
+option(ORKELA_BUILD_GATES "Build portable Orkela session gates" ON)
 set(
     RESONITH_SOURCE_DIR
     ""
@@ -26,7 +27,7 @@ else()
     FetchContent_Declare(
         resonith
         GIT_REPOSITORY https://github.com/moshkinyevhen/resonith.git
-        GIT_TAG f45011f8bffd123e9ad6db32a9f927db6cb6942f
+        GIT_TAG d8245c207ada6cd7a1f72ad595e7edbd933d2da4
         SOURCE_SUBDIR native
     )
     FetchContent_MakeAvailable(resonith)
@@ -69,6 +70,27 @@ function(orkela_enable_strict_warnings target)
 endfunction()
 
 orkela_enable_strict_warnings(orkela_session)
+
+if(ORKELA_BUILD_GATES AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_executable(
+        orkela_session_gate
+        tests/resonith_session_gate.cpp
+    )
+    target_compile_features(orkela_session_gate PRIVATE cxx_std_23)
+    target_link_libraries(orkela_session_gate PRIVATE Orkela::Session)
+    set_target_properties(
+        orkela_session_gate
+        PROPERTIES CXX_EXTENSIONS OFF
+    )
+    orkela_enable_strict_warnings(orkela_session_gate)
+    enable_testing()
+    add_test(
+        NAME orkela_session_gate
+        COMMAND
+            orkela_session_gate
+            "${CMAKE_CURRENT_SOURCE_DIR}/samples/emotional-piano.resonith"
+    )
+endif()
 
 if(NOT ORKELA_BUILD_APPLICATIONS)
     return()

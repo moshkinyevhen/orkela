@@ -1103,7 +1103,7 @@ std::array<setting_tile, 6U> command_tiles(
             },
             {
                 L"Truth path",
-                L"Resonith Core → PCM16 → device; no WAV intermediary.",
+                L"Bounded MAF Core → PCM16 → device; no WAV intermediary.",
                 L"DIRECT",
                 false,
                 true,
@@ -2287,7 +2287,7 @@ void begin_playback(app_state* state, std::uint32_t start_frame) {
         state->audio->frame_count - 1U
     );
     state->cursor_frame = bounded;
-    state->status = L"Playing native Resonith Truth reconstruction.";
+    state->status = L"Playing bounded MAF Truth reconstruction.";
     const std::uint64_t generation = ++state->playback_generation;
     const HWND window = state->window;
     state->player.set_volume(state->volume);
@@ -3118,7 +3118,7 @@ LRESULT CALLBACK window_procedure(
         const std::wstring extension =
             lowercase(state->path.extension().wstring());
         state->format_name = extension == L".resonith"
-            ? L"RESONITH · NATIVE TRUTH"
+            ? L"RESONITH · BOUNDED MAF"
             : L"RESONITH · RESEARCH TRANSPORT";
         state->status =
             L"Ready. Space plays or pauses; arrows use the selected seek step.";
