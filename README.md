@@ -5,7 +5,7 @@ Orkela is a native media player for the SceneLith ecosystem. It plays real
 Core decoder and sending reconstructed PCM directly to the operating system's
 audio API.
 
-Current version: **0.3.0-alpha.2**.
+Current candidate version: **0.3.0-alpha.3**.
 
 `.resonith file -> Resonith Core -> PCM16 -> Windows audio`
 
@@ -39,7 +39,9 @@ an unavailable decoder.
 - open, play/pause, stop, seek, skip, volume, keyboard controls, and
   file drag-and-drop;
 - direct LPS4/LPS5 preflight and decoding through Resonith Core;
-- pinned bounded MAF DSP Core revision `d8245c2`, including deterministic
+- direct bounded `MFT1` execution through Resonith Core, including immutable
+  Basis placement, circular alignment, and reverse instances;
+- pinned bounded MAF DSP Core revision `9f7650b`, including deterministic
   periodic, source-filter, stochastic, transient, Innovation, and mix
   operations beneath the existing admitted transport;
 - responsive background preflight/decode for long-form media;
@@ -57,6 +59,8 @@ The first package and Android-emulator evidence is recorded in the
 The bounded MAF Core update, complete speech/piano/Mozart pull-session results,
 and same-revision Windows/mobile CI are recorded in the
 [0.3.0-alpha.2 Player Gate](docs/results/BOUNDED_MAF_PLAYER_2026-07-27.md).
+The direct typed-MAF playback addition is recorded in the
+[0.3.0-alpha.3 MFT1 Gate](docs/results/MFT1_PLAYER_GATE_2026-07-27.md).
 
 This milestone decodes a complete research clip into bounded application
 memory before playback. Streaming decode, playlists, mobile front ends, and
@@ -101,6 +105,10 @@ Android uses its pinned Gradle wrapper:
 cd platform/android
 .\gradlew.bat :app:assembleDebug
 ```
+
+For a local unpublished Resonith integration checkout, set
+`ORKELA_RESONITH_SOURCE_DIR` before invoking Gradle. Public and CI builds omit
+that variable and use the immutable Resonith revision pinned by CMake.
 
 The local APK is
 `platform/android/app/build/outputs/apk/debug/app-debug.apk`. iOS device and

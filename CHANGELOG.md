@@ -5,7 +5,7 @@ release links to reproducible QA evidence and identifies the exact executable.
 
 ## [Unreleased]
 
-Candidate version: **0.3.0-alpha.2**. Publication remains blocked until the
+Candidate version: **0.3.0-alpha.3**. Publication remains blocked until the
 complete platform and O-2 release-evidence gates pass.
 
 ### Added
@@ -20,12 +20,15 @@ complete platform and O-2 release-evidence gates pass.
   build contract.
 - Pinned Gradle 9.4.1 wrapper, Android Gradle Plugin 9.2.1, SDK 36, NDK r29,
   and macOS/Xcode CI gates.
-- Resonith Core revision `d8245c207ada6cd7a1f72ad595e7edbd933d2da4`,
+- Resonith Core revision `9f7650bf0bf06a35388119614745c6db1dbef709`,
   including the bounded integer MAF DSP substrate and its cross-platform
   conformance fixes.
 - A portable pull-session executable gate that decodes complete streams,
   verifies timeline/resource bounds, fingerprints PCM, and rejects a
   deterministic truncation before playback.
+- Direct bounded `MFT1` pull playback through Resonith Core, including
+  forward/reverse immutable Basis instances, circular alignment, callback
+  partitioning, and preflight rejection of a truncated stream.
 
 ### Changed
 

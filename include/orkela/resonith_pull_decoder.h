@@ -28,10 +28,11 @@ enum class pull_result {
 /*
  * Allocation-owning adapter around Resonith Core's allocation-free pull API.
  *
- * Opening authenticates the complete research transport and allocates bounded
- * field workspaces once. `read_next` performs no allocation on its successful
- * real-time path; callers may therefore decode on a dedicated producer thread
- * and feed a platform audio queue without exposing codec state to UI code.
+ * Opening authenticates either compact lapped transport or prospective MFT1
+ * and allocates its bounded workspace once. `read_next` performs no allocation
+ * on its successful real-time path; callers may therefore decode on a
+ * dedicated producer thread and feed a platform audio queue without exposing
+ * codec state to UI code.
  */
 class resonith_pull_decoder final {
 public:

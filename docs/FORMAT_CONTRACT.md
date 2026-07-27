@@ -24,5 +24,11 @@ independently decodable and MUST NOT merge their reference graphs.
 The `.lps`, `.lps4`, `.lps5`, and `.rsc` suffixes are research compatibility
 identifiers. They are not stable public media extensions.
 
+The canonical `.resonith` extension identifies the codec family, not one
+internal research transport. Orkela currently dispatches admitted lapped
+streams and bounded typed-MAF `MFT1` streams by validated magic and complete
+preflight. It never selects a decoder from the filename alone and never
+converts `MFT1` to a temporary WAV before playback.
+
 MIME types, FourCC values, codec strings, and the `.orka` binary layout remain
 unassigned until registry and conformance gates pass.

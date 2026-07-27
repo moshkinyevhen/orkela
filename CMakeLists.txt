@@ -15,6 +15,7 @@ set(
 )
 
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(RESONITH_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(RESONITH_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(RESONITH_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
 
@@ -27,7 +28,7 @@ else()
     FetchContent_Declare(
         resonith
         GIT_REPOSITORY https://github.com/moshkinyevhen/resonith.git
-        GIT_TAG d8245c207ada6cd7a1f72ad595e7edbd933d2da4
+        GIT_TAG 9f7650bf0bf06a35388119614745c6db1dbef709
         SOURCE_SUBDIR native
     )
     FetchContent_MakeAvailable(resonith)
@@ -89,6 +90,22 @@ if(ORKELA_BUILD_GATES AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         COMMAND
             orkela_session_gate
             "${CMAKE_CURRENT_SOURCE_DIR}/samples/emotional-piano.resonith"
+    )
+
+    add_executable(
+        orkela_maf_session_gate
+        tests/maf_session_gate.cpp
+    )
+    target_compile_features(orkela_maf_session_gate PRIVATE cxx_std_23)
+    target_link_libraries(orkela_maf_session_gate PRIVATE Orkela::Session)
+    set_target_properties(
+        orkela_maf_session_gate
+        PROPERTIES CXX_EXTENSIONS OFF
+    )
+    orkela_enable_strict_warnings(orkela_maf_session_gate)
+    add_test(
+        NAME orkela_maf_session_gate
+        COMMAND orkela_maf_session_gate
     )
 endif()
 

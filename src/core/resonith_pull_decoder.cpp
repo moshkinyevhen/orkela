@@ -1,6 +1,7 @@
 #include "orkela/resonith_pull_decoder.h"
 
 #include "resonith/lapped_compact.h"
+#include "resonith/maf_typed.h"
 #include "resonith/status.h"
 
 #include <algorithm>
@@ -81,6 +82,67 @@ struct field_storage {
     }
 };
 
+struct maf_storage {
+    std::vector<std::int32_t> coefficients;
+    std::vector<std::int16_t> bases;
+    std::vector<std::int16_t> histories;
+    std::vector<std::int16_t> planar;
+    std::vector<std::int16_t> excitation;
+    std::vector<std::int16_t> filtered;
+    std::vector<std::int16_t> matrix;
+
+    explicit maf_storage(
+        const resonith_maf_typed_requirements& requirements
+    )
+        : coefficients(
+              std::max<std::size_t>(
+                  1U,
+                  requirements.filter_coefficient_elements
+              )
+          ),
+          bases(std::max<std::size_t>(1U, requirements.basis_elements)),
+          histories(
+              std::max<std::size_t>(
+                  1U,
+                  requirements.filter_history_elements
+              )
+          ),
+          planar(std::max<std::size_t>(1U, requirements.planar_elements)),
+          excitation(
+              std::max<std::size_t>(1U, requirements.working_elements / 2U)
+          ),
+          filtered(
+              std::max<std::size_t>(1U, requirements.working_elements / 2U)
+          ),
+          matrix(
+              std::max<std::size_t>(
+                  1U,
+                  requirements.mix_matrix_elements
+              )
+          ) {}
+
+    resonith_maf_typed_workspace view(
+        const resonith_maf_typed_requirements& requirements
+    ) noexcept {
+        return {
+            coefficients.data(),
+            requirements.filter_coefficient_elements,
+            bases.data(),
+            requirements.basis_elements,
+            histories.data(),
+            requirements.filter_history_elements,
+            planar.data(),
+            requirements.planar_elements,
+            excitation.data(),
+            requirements.working_elements / 2U,
+            filtered.data(),
+            requirements.working_elements / 2U,
+            matrix.data(),
+            requirements.mix_matrix_elements,
+        };
+    }
+};
+
 bool fail(std::string message, std::string* error) {
     if (error != nullptr) {
         *error = std::move(message);
@@ -91,18 +153,25 @@ bool fail(std::string message, std::string* error) {
 }  // namespace
 
 struct resonith_pull_decoder::implementation {
+    enum class backend {
+        lapped_compact,
+        maf_typed,
+    };
+
     std::vector<std::uint8_t> input;
+    backend active_backend = backend::lapped_compact;
     resonith_lapped_compact_session session{};
     resonith_lapped_compact_requirements requirements{};
+    resonith_maf_typed_session maf_session{};
+    resonith_maf_typed_requirements maf_requirements{};
     resonith_stream_info stream_info{};
-    field_storage current;
-    field_storage lookahead;
+    std::unique_ptr<field_storage> current;
+    std::unique_ptr<field_storage> lookahead;
+    std::unique_ptr<maf_storage> maf_memory;
     std::uint32_t expected_start = 0U;
 
     explicit implementation(std::vector<std::uint8_t> bytes)
-        : input(std::move(bytes)),
-          current({}, false),
-          lookahead({}, false) {
+        : input(std::move(bytes)) {
         if (input.empty()) {
             throw decoder_error("input is empty");
         }
@@ -110,6 +179,41 @@ struct resonith_pull_decoder::implementation {
             throw decoder_error("input exceeds the 512 MiB research limit");
         }
 
+        if (
+            input.size() >= 4U
+            && input[0] == static_cast<std::uint8_t>('M')
+            && input[1] == static_cast<std::uint8_t>('F')
+            && input[2] == static_cast<std::uint8_t>('T')
+            && input[3] == static_cast<std::uint8_t>('1')
+        ) {
+            open_maf();
+            return;
+        }
+        open_lapped();
+    }
+
+    void validate_output_bounds(
+        std::uint32_t sample_rate,
+        std::uint32_t frame_count,
+        std::uint16_t channels
+    ) {
+        if (channels == 0U || channels > 2U || sample_rate == 0U) {
+            throw decoder_error(
+                "this Orkela milestone supports mono or stereo PCM16"
+            );
+        }
+        if (
+            static_cast<std::uint64_t>(frame_count)
+                > maximum_output_seconds
+                    * static_cast<std::uint64_t>(sample_rate)
+        ) {
+            throw decoder_error(
+                "decoded duration exceeds the two-hour research limit"
+            );
+        }
+    }
+
+    void open_lapped() {
         const resonith_status status = resonith_lapped_compact_open(
             input.data(),
             input.size(),
@@ -119,32 +223,62 @@ struct resonith_pull_decoder::implementation {
         if (status != RESONITH_STATUS_OK) {
             throw decoder_error(status_message("Resonith preflight", status));
         }
-        if (
-            requirements.output_channels == 0U
-            || requirements.output_channels > 2U
-            || requirements.sample_rate == 0U
-        ) {
-            throw decoder_error(
-                "this Orkela milestone supports mono or stereo PCM16"
-            );
-        }
-        if (
-            static_cast<std::uint64_t>(requirements.frame_count)
-                > maximum_output_seconds
-                    * static_cast<std::uint64_t>(requirements.sample_rate)
-        ) {
-            throw decoder_error(
-                "decoded duration exceeds the two-hour research limit"
-            );
-        }
-
-        current = field_storage(requirements.maximum_current, true);
-        lookahead = field_storage(requirements.maximum_lookahead, false);
+        validate_output_bounds(
+            requirements.sample_rate,
+            requirements.frame_count,
+            requirements.output_channels
+        );
+        current = std::make_unique<field_storage>(
+            requirements.maximum_current,
+            true
+        );
+        lookahead = std::make_unique<field_storage>(
+            requirements.maximum_lookahead,
+            false
+        );
         stream_info = {
             requirements.sample_rate,
             requirements.frame_count,
             requirements.output_channels,
             requirements.maximum_logical_output_elements,
+        };
+    }
+
+    void open_maf() {
+        active_backend = backend::maf_typed;
+        resonith_status status = resonith_maf_typed_inspect(
+            input.data(),
+            input.size(),
+            &maf_requirements
+        );
+        if (status != RESONITH_STATUS_OK) {
+            throw decoder_error(
+                status_message("Resonith MFT1 preflight", status)
+            );
+        }
+        validate_output_bounds(
+            maf_requirements.sample_rate,
+            maf_requirements.total_frames,
+            maf_requirements.output_channels
+        );
+        maf_memory = std::make_unique<maf_storage>(maf_requirements);
+        resonith_maf_typed_workspace workspace =
+            maf_memory->view(maf_requirements);
+        status = resonith_maf_typed_open(
+            input.data(),
+            input.size(),
+            &workspace,
+            &maf_session
+        );
+        if (status != RESONITH_STATUS_OK) {
+            throw decoder_error(status_message("Resonith MFT1 open", status));
+        }
+        stream_info = {
+            maf_requirements.sample_rate,
+            maf_requirements.total_frames,
+            maf_requirements.output_channels,
+            static_cast<std::size_t>(maf_requirements.render_quantum)
+                * maf_requirements.output_channels,
         };
     }
 };
@@ -200,6 +334,49 @@ pull_result resonith_pull_decoder::read_next(
     *frames_written = 0U;
 
     auto& state = *implementation_;
+    if (
+        state.active_backend
+        == implementation::backend::maf_typed
+    ) {
+        if (state.expected_start == state.maf_requirements.total_frames) {
+            if (error != nullptr) {
+                error->clear();
+            }
+            return pull_result::end;
+        }
+        if (destination.size() < state.stream_info.maximum_packet_elements) {
+            fail("pull destination is smaller than the preflight bound", error);
+            return pull_result::error;
+        }
+        const std::uint32_t remaining =
+            state.maf_requirements.total_frames - state.expected_start;
+        const std::uint32_t requested = std::min(
+            state.maf_requirements.render_quantum,
+            remaining
+        );
+        std::uint32_t written = 0U;
+        const resonith_status status = resonith_maf_typed_render(
+            &state.maf_session,
+            requested,
+            destination.data(),
+            destination.size(),
+            &written
+        );
+        if (status != RESONITH_STATUS_OK || written > requested) {
+            fail(status_message("Resonith MFT1 render", status), error);
+            return pull_result::error;
+        }
+        if (written == 0U) {
+            fail("Resonith MFT1 ended before its declared frame count", error);
+            return pull_result::error;
+        }
+        *frames_written = written;
+        state.expected_start += written;
+        if (error != nullptr) {
+            error->clear();
+        }
+        return pull_result::data;
+    }
     if (state.session.next_packet >= state.session.packet_count) {
         if (state.expected_start != state.requirements.frame_count) {
             fail("Resonith stream ended before its declared frame count", error);
@@ -218,9 +395,9 @@ pull_result resonith_pull_decoder::read_next(
     const bool final_packet =
         state.session.next_packet + 1U == state.session.packet_count;
     resonith_lapped_workspace current_view =
-        state.current.view(state.requirements.maximum_current);
+        state.current->view(state.requirements.maximum_current);
     resonith_lapped_workspace lookahead_view =
-        state.lookahead.view(state.requirements.maximum_lookahead);
+        state.lookahead->view(state.requirements.maximum_lookahead);
     const resonith_status status = resonith_lapped_compact_decode_next(
         &state.session,
         &current_view,

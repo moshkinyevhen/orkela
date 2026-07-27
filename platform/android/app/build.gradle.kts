@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
 }
 
+val localResonithSource = System.getenv("ORKELA_RESONITH_SOURCE_DIR")
+
 android {
     namespace = "org.scenelith.orkela"
     compileSdk = 36
@@ -11,8 +13,8 @@ android {
         applicationId = "org.scenelith.orkela"
         minSdk = 26
         targetSdk = 36
-        versionCode = 30002
-        versionName = "0.3.0-alpha.2"
+        versionCode = 30003
+        versionName = "0.3.0-alpha.3"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -27,6 +29,9 @@ android {
                     "-DRESONITH_BUILD_FUZZERS=OFF",
                     "-DANDROID_STL=c++_static",
                 )
+                if (!localResonithSource.isNullOrBlank()) {
+                    arguments += "-DRESONITH_SOURCE_DIR=$localResonithSource"
+                }
                 cppFlags += listOf("-std=c++23")
             }
         }
