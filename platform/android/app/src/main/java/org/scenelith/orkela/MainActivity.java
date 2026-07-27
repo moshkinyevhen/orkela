@@ -360,6 +360,16 @@ public final class MainActivity extends Activity {
                     );
                 ui.post(() -> progress.setProgress(position));
             }
+            // AudioTrack.write confirms transfer into the device queue, not
+            // audible completion. Keep the device alive until its monotonic
+            // playback head reaches the final submitted PCM frame.
+            while (
+                generation == playbackGeneration.get()
+                && Integer.toUnsignedLong(track.getPlaybackHeadPosition())
+                    < Integer.toUnsignedLong(framesPlayed)
+            ) {
+                Thread.sleep(10L);
+            }
             if (generation == playbackGeneration.get()) {
                 ui.post(() -> finishPlayback("Playback complete"));
             }
