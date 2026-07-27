@@ -35,6 +35,8 @@ complete platform and O-2 release-evidence gates pass.
 - The player now identifies the active path as bounded MAF Truth playback.
   Optional Gemini Foundry analysis remains encoder-side and adds no player
   network or credential dependency.
+- Published reproducible `0.3.0-alpha.2` Core/build/mobile evidence and
+  complete speech, piano, and 400.773-second Mozart pull-session results.
 
 ### Planned
 

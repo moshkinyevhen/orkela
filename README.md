@@ -54,6 +54,9 @@ JNI to `AudioTrack`; iOS performs background decode and schedules PCM through
 responsibility split and mandatory build matrix.
 The first package and Android-emulator evidence is recorded in the
 [Mobile Player Gate](docs/results/MOBILE_PLAYER_GATE_2026-07-27.md).
+The bounded MAF Core update, complete speech/piano/Mozart pull-session results,
+and same-revision Windows/mobile CI are recorded in the
+[0.3.0-alpha.2 Player Gate](docs/results/BOUNDED_MAF_PLAYER_2026-07-27.md).
 
 This milestone decodes a complete research clip into bounded application
 memory before playback. Streaming decode, playlists, mobile front ends, and
