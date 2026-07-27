@@ -5,7 +5,7 @@ Orkela is a native media player for the SceneLith ecosystem. It plays real
 Core decoder and sending reconstructed PCM directly to the operating system's
 audio API.
 
-Current version: **0.2.0-alpha.2**.
+Current version: **0.3.0-alpha.1**.
 
 `.resonith file -> Resonith Core -> PCM16 -> Windows audio`
 
@@ -49,6 +49,8 @@ JNI to `AudioTrack`; iOS performs background decode and schedules PCM through
 `AVAudioEngine`. See
 [Platform Architecture](docs/PLATFORM_ARCHITECTURE.md) for the exact
 responsibility split and mandatory build matrix.
+The first package and Android-emulator evidence is recorded in the
+[Mobile Player Gate](docs/results/MOBILE_PLAYER_GATE_2026-07-27.md).
 
 This milestone decodes a complete research clip into bounded application
 memory before playback. Streaming decode, playlists, mobile front ends, and

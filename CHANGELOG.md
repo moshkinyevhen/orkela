@@ -5,6 +5,9 @@ release links to reproducible QA evidence and identifies the exact executable.
 
 ## [Unreleased]
 
+Candidate version: **0.3.0-alpha.1**. Publication remains blocked until the
+complete platform and O-2 release-evidence gates pass.
+
 ### Added
 
 - Strict C++23 `Orkela::Session` with bounded Resonith preflight and an
