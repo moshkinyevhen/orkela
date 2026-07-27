@@ -150,6 +150,7 @@ elseif(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
             Orkela::Session
             "-framework AVFAudio"
             "-framework Foundation"
+            "-framework QuartzCore"
             "-framework UIKit"
             "-framework UniformTypeIdentifiers"
     )
