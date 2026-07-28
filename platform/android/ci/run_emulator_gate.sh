@@ -92,13 +92,15 @@ printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
 # allocated while ADB is already listening. Android Emulator documents this
 # ordering as material to device discovery for some port assignments.
 adb start-server
-emulator_feature_args=""
+gpu_mode="software"
 if [[ "$runtime_api" -eq 37 ]]; then
-  # Android 17 build CE2A.260420.019 exposes an inconsistent guest/host DMA
-  # color-buffer path with Emulator 36.6.11 on Linux. Disable both generations
-  # of that emulator-only transport family before the guest starts. The Android
-  # compositor, RegionSampling, renderer, UI and screenshot gates stay enabled.
-  emulator_feature_args="-feature -GLDMA -feature -GLDMA2"
+  # Use one coherent official software renderer for both GLES and Vulkan on the
+  # pinned Android 17 image. Emulator's generic `software` selector chose the
+  # mixed swangle/lavapipe path on GitHub and repeatedly crashed SurfaceFlinger
+  # RegionSampling in GoldfishMapper. SwiftShader keeps the guest compositor,
+  # luma sampling, DMA features, and SELinux unchanged while replacing only the
+  # host renderer selection.
+  gpu_mode="swiftshader"
 fi
 "$ANDROID_HOME/emulator/emulator" "@$avd_name" \
   -no-window \
@@ -109,8 +111,7 @@ fi
   -cores 2 \
   -memory 4096 \
   -partition-size 4096 \
-  -gpu software \
-  $emulator_feature_args \
+  -gpu "$gpu_mode" \
   -port "$emulator_console_port" \
   -verbose \
   > "$evidence/logs/emulator.log" 2>&1 &
@@ -147,13 +148,15 @@ if [[ "$device_seen" -ne 1 ]]; then
 fi
 export ANDROID_SERIAL="$device_serial"
 
-# API 37 uses a non-default host-emulator graphics transport configuration, but
-# the Android guest compositor remains stock. API 26 uses stock configuration
-# on both sides.
+# API 37 explicitly selects the official SwiftShader software renderer, while
+# all Emulator feature flags and the Android guest compositor remain stock.
+# API 26 retains Emulator's general software selector for legacy coverage.
 emulator_graphics_workaround="none"
 stock_android_guest_compositor_configuration=true
 stock_emulator_graphics_feature_configuration=true
 surfaceflinger_crash_signatures_before=0
+compositor_soak_seconds=0
+compositor_soak_screenshots=0
 observed_fingerprint=""
 
 ready=0
@@ -390,24 +393,14 @@ if [[ "$runtime_api" -eq 37 ]]; then
   fi
 
   grep -Fq \
-    "Feature 'GLDMA' (51) is overridden to 'disabled'" \
+    "emuglConfig_init: gpu_mode_requested: swiftshader" \
     "$evidence/logs/emulator.log"
   grep -Fq \
-    "Feature 'GLDMA2' (52) is overridden to 'disabled'" \
+    "emuglConfig_init: vulkan_mode_selected:swiftshader gles_mode_selected:swiftshader" \
     "$evidence/logs/emulator.log"
   grep -Fq \
-    "gfxstreamFeature:GlDma = 0" \
+    "Graphics Adapter Android Emulator OpenGL ES Translator (Google SwiftShader)" \
     "$evidence/logs/emulator.log"
-  grep -Fq \
-    "gfxstreamFeature:GlDma2 = 0" \
-    "$evidence/logs/emulator.log"
-  if grep -Fq "gfxstreamFeature:GlDma = 1" \
-      "$evidence/logs/emulator.log" \
-      || grep -Fq "gfxstreamFeature:GlDma2 = 1" \
-        "$evidence/logs/emulator.log"; then
-    echo "Emulator DMA graphics feature was re-enabled after override" >&2
-    exit 1
-  fi
 
   {
     echo "fingerprint=$observed_fingerprint"
@@ -416,13 +409,14 @@ if [[ "$runtime_api" -eq 37 ]]; then
     echo "renderer_egl=$renderer_egl"
     echo "renderer_transport=$renderer_transport"
     echo "emulator=$emulator_version"
-    echo "GLDMA=disabled"
-    echo "GLDMA2=disabled"
+    echo "gpu_mode=$gpu_mode"
+    echo "gles_backend=swiftshader"
+    echo "vulkan_backend=swiftshader"
+    echo "emulator_feature_overrides=none"
     echo "guest_luma_sampling=${luma_sampling:-default}"
     echo "surfaceflinger_pid=$surfaceflinger_pid_initial"
   } > "$evidence/EMULATOR-GRAPHICS-CONFIGURATION.txt"
-  emulator_graphics_workaround="disable-GLDMA-and-GLDMA2"
-  stock_emulator_graphics_feature_configuration=false
+  emulator_graphics_workaround="official-explicit-swiftshader"
 fi
 
 timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
@@ -433,6 +427,276 @@ surfaceflinger_crash_signatures_before="$(
     "$evidence/logs/logcat-crash-before-app-gate.txt" \
     || true
 )"
+
+if [[ "$runtime_api" -eq 37 ]]; then
+  # The original failure recurred every 30-31 seconds in RegionSampling. A few
+  # fast service checks can therefore pass between crashes. Exercise the stock
+  # luma/compositor path for four full failure periods and require the same
+  # SurfaceFlinger process, healthy Binder/storage state, four complete
+  # screenshots, and no matching crash record.
+  test "$surfaceflinger_crash_signatures_before" -eq 0
+  compositor_soak_screenshots=4
+  soak_log="$evidence/logs/compositor-soak.log"
+  soak_started="$SECONDS"
+  printf '%s\n' \
+    "utc,observation,surfaceflinger_pid,package,surfaceflinger,mount,volumes" \
+    > "$soak_log"
+  for observation in $(seq 1 24); do
+    soak_surfaceflinger_pid="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell pidof surfaceflinger \
+        | tr -d '\r'
+    )"
+    soak_package="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell service check package \
+        | tr -d '\r'
+    )"
+    soak_surfaceflinger="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell service check SurfaceFlinger \
+        | tr -d '\r'
+    )"
+    soak_mount="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell service check mount \
+        | tr -d '\r'
+    )"
+    soak_volumes="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell sm list-volumes all \
+        | tr -d '\r'
+    )"
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+      "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+      "$observation" \
+      "$soak_surfaceflinger_pid" \
+      "$(printf '%s' "$soak_package" | tr '\r\n\t,' '    ')" \
+      "$(printf '%s' "$soak_surfaceflinger" | tr '\r\n\t,' '    ')" \
+      "$(printf '%s' "$soak_mount" | tr '\r\n\t,' '    ')" \
+      "$(printf '%s' "$soak_volumes" | tr '\r\n\t,' '    ')" \
+      >> "$soak_log"
+    if [[ "$soak_surfaceflinger_pid" != "$surfaceflinger_pid_initial" \
+        || "$soak_package" != "Service package: found" \
+        || "$soak_surfaceflinger" != "Service SurfaceFlinger: found" \
+        || "$soak_mount" != "Service mount: found" ]] \
+        || ! grep -Eq "^private mounted([[:space:]]|$)" \
+          <<< "$soak_volumes" \
+        || ! grep -Eq "^emulated;0 mounted([[:space:]]|$)" \
+          <<< "$soak_volumes"; then
+      echo "Android compositor became unhealthy during the 120-second soak" >&2
+      exit 1
+    fi
+    case "$observation" in
+      1|8|16|24)
+        screenshot_index=$(
+          case "$observation" in
+            1) echo 1 ;;
+            8) echo 2 ;;
+            16) echo 3 ;;
+            24) echo 4 ;;
+          esac
+        )
+        timeout --signal=TERM --kill-after=5s 30s \
+          adb -s "$device_serial" exec-out screencap -p \
+          > "$evidence/compositor-soak-$screenshot_index.png"
+        ;;
+    esac
+    sleep 5
+  done
+  compositor_soak_seconds=$((SECONDS - soak_started))
+  test "$compositor_soak_seconds" -ge 120
+  soak_surfaceflinger_pid_final="$(
+    adb -s "$device_serial" shell pidof surfaceflinger | tr -d '\r'
+  )"
+  test "$soak_surfaceflinger_pid_final" = "$surfaceflinger_pid_initial"
+  timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
+    > "$evidence/logs/logcat-crash-after-compositor-soak.txt"
+  soak_crash_signatures="$(
+    grep -Eic \
+      "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT" \
+      "$evidence/logs/logcat-crash-after-compositor-soak.txt" \
+      || true
+  )"
+  test "$soak_crash_signatures" -eq 0
+  python3 - \
+    "$compositor_soak_seconds" \
+    "$evidence/compositor-soak-1.png" \
+    "$evidence/compositor-soak-2.png" \
+    "$evidence/compositor-soak-3.png" \
+    "$evidence/compositor-soak-4.png" \
+    > "$evidence/COMPOSITOR-SOAK-SCREENSHOTS.json" <<'PY'
+import json
+from pathlib import Path
+import struct
+import sys
+import zlib
+
+soak_seconds = int(sys.argv[1])
+records = []
+for raw_path in sys.argv[2:]:
+    path = Path(raw_path)
+    data = path.read_bytes()
+    signature = b"\x89PNG\r\n\x1a\n"
+    if (
+        len(data) < 45
+        or len(data) > 64 * 1024 * 1024
+        or not data.startswith(signature)
+    ):
+        raise SystemExit(f"{path.name}: not a complete PNG")
+
+    offset = len(signature)
+    chunks = []
+    idat = bytearray()
+    width = height = 0
+    bit_depth = color_type = compression = filter_method = interlace = -1
+    while offset < len(data):
+        if offset + 12 > len(data):
+            raise SystemExit(f"{path.name}: truncated chunk header")
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        payload_start = offset + 8
+        payload_end = payload_start + length
+        chunk_end = payload_end + 4
+        if chunk_end > len(data):
+            raise SystemExit(f"{path.name}: truncated chunk payload")
+        expected_crc = struct.unpack(">I", data[payload_end:chunk_end])[0]
+        actual_crc = zlib.crc32(kind + data[payload_start:payload_end])
+        if actual_crc != expected_crc:
+            raise SystemExit(f"{path.name}: invalid CRC for {kind!r}")
+        chunks.append(kind)
+        if len(chunks) == 1:
+            if kind != b"IHDR" or length != 13:
+                raise SystemExit(f"{path.name}: no canonical IHDR")
+            width, height = struct.unpack(
+                ">II",
+                data[payload_start:payload_start + 8],
+            )
+            (
+                bit_depth,
+                color_type,
+                compression,
+                filter_method,
+                interlace,
+            ) = data[payload_start + 8:payload_start + 13]
+        if kind == b"IDAT":
+            idat.extend(data[payload_start:payload_end])
+        offset = chunk_end
+        if kind == b"IEND":
+            break
+
+    if width <= 0 or height <= 0:
+        raise SystemExit(f"{path.name}: invalid dimensions")
+    if b"IDAT" not in chunks or chunks[-1] != b"IEND" or offset != len(data):
+        raise SystemExit(f"{path.name}: incomplete IDAT/IEND sequence")
+    if (
+        bit_depth != 8
+        or color_type not in (2, 6)
+        or compression != 0
+        or filter_method != 0
+        or interlace != 0
+    ):
+        raise SystemExit(f"{path.name}: unsupported canonical screenshot mode")
+    if (
+        width > 8192
+        or height > 8192
+        or width * height > 32 * 1024 * 1024
+    ):
+        raise SystemExit(f"{path.name}: screenshot dimensions exceed bounds")
+
+    channels = 3 if color_type == 2 else 4
+    stride = width * channels
+    expected_packed_bytes = height * (stride + 1)
+    if expected_packed_bytes > 128 * 1024 * 1024:
+        raise SystemExit(f"{path.name}: decompressed screenshot exceeds bounds")
+    decompressor = zlib.decompressobj()
+    packed = decompressor.decompress(
+        bytes(idat),
+        expected_packed_bytes + 1,
+    )
+    if (
+        len(packed) != expected_packed_bytes
+        or not decompressor.eof
+        or decompressor.unconsumed_tail
+        or decompressor.unused_data
+    ):
+        raise SystemExit(f"{path.name}: unexpected decompressed size")
+    previous = bytearray(stride)
+    pixels = []
+
+    def paeth(left, above, upper_left):
+        prediction = left + above - upper_left
+        left_distance = abs(prediction - left)
+        above_distance = abs(prediction - above)
+        diagonal_distance = abs(prediction - upper_left)
+        if left_distance <= above_distance and left_distance <= diagonal_distance:
+            return left
+        if above_distance <= diagonal_distance:
+            return above
+        return upper_left
+
+    source_offset = 0
+    x_step = max(1, width // 64)
+    y_step = max(1, height // 64)
+    for y in range(height):
+        filter_type = packed[source_offset]
+        source_offset += 1
+        row = bytearray(packed[source_offset:source_offset + stride])
+        source_offset += stride
+        for byte_index in range(stride):
+            left = row[byte_index - channels] if byte_index >= channels else 0
+            above = previous[byte_index]
+            upper_left = (
+                previous[byte_index - channels]
+                if byte_index >= channels
+                else 0
+            )
+            if filter_type == 1:
+                row[byte_index] = (row[byte_index] + left) & 0xFF
+            elif filter_type == 2:
+                row[byte_index] = (row[byte_index] + above) & 0xFF
+            elif filter_type == 3:
+                row[byte_index] = (
+                    row[byte_index] + ((left + above) >> 1)
+                ) & 0xFF
+            elif filter_type == 4:
+                row[byte_index] = (
+                    row[byte_index] + paeth(left, above, upper_left)
+                ) & 0xFF
+            elif filter_type != 0:
+                raise SystemExit(f"{path.name}: invalid PNG filter")
+        if y % y_step == 0:
+            for x in range(0, width, x_step):
+                pixel_offset = x * channels
+                pixels.append(tuple(row[pixel_offset:pixel_offset + 3]))
+        previous = row
+
+    unique_pixels = len(set(pixels))
+    luminance = [
+        (54 * red + 183 * green + 19 * blue) >> 8
+        for red, green, blue in pixels
+    ]
+    luminance_span = max(luminance) - min(luminance)
+    if unique_pixels < 8 or luminance_span < 8:
+        raise SystemExit(f"{path.name}: screenshot lacks visual diversity")
+    records.append({
+        "file": path.name,
+        "width": width,
+        "height": height,
+        "bytes": len(data),
+        "sampled_unique_rgb": unique_pixels,
+        "sampled_luminance_span": luminance_span,
+    })
+
+if len(records) != 4:
+    raise SystemExit(f"expected four screenshots, found {len(records)}")
+print(json.dumps({
+    "schema": 1,
+    "soak_seconds": soak_seconds,
+    "screenshots": records,
+}, indent=2, sort_keys=True))
+PY
+fi
 
 # API 26 lacks getconf. Newer runtimes expose the kernel page size directly;
 # this is essential for the Android 17 16-KiB gate because /proc/self/smaps can
@@ -716,7 +980,10 @@ jq -n \
   --arg emulator_version "$emulator_version" \
   --arg renderer_egl "$renderer_egl" \
   --arg renderer_transport "$renderer_transport" \
+  --arg emulator_gpu_mode "$gpu_mode" \
   --arg emulator_graphics_workaround "$emulator_graphics_workaround" \
+  --argjson compositor_soak_seconds "$compositor_soak_seconds" \
+  --argjson compositor_soak_screenshots "$compositor_soak_screenshots" \
   --argjson stock_android_guest_compositor_configuration \
     "$stock_android_guest_compositor_configuration" \
   --argjson stock_emulator_graphics_feature_configuration \
@@ -738,6 +1005,9 @@ jq -n \
     emulator_version: $emulator_version,
     renderer_egl: $renderer_egl,
     renderer_transport: $renderer_transport,
+    emulator_gpu_mode: $emulator_gpu_mode,
+    compositor_soak_seconds: $compositor_soak_seconds,
+    compositor_soak_screenshots: $compositor_soak_screenshots,
     stock_android_guest_compositor_configuration:
       $stock_android_guest_compositor_configuration,
     stock_emulator_graphics_feature_configuration:

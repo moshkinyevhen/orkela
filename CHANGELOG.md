@@ -114,10 +114,14 @@ Local public-pin evidence:
 
 ### Fixed
 
-- Android 17 emulator gates now disable the inconsistent emulator-only GLDMA
-  and GLDMA2 graphics transports before guest boot while leaving the Android
-  compositor and RegionSampling enabled. Exact feature-state, SurfaceFlinger
-  lifetime, crash-delta, and CRC-valid screenshot evidence is mandatory.
+- Android 17 emulator gates now select the official unified SwiftShader
+  software renderer instead of Emulator's unstable mixed swangle/lavapipe
+  `software` selection. The Android guest, DMA features, luma sampling,
+  compositor, and RegionSampling remain unchanged. Each gate requires a
+  measured 120-second compositor soak, one SurfaceFlinger lifetime, healthy
+  services/storage at all 24 bounded observations, zero matching crash
+  signatures, and four complete, visually non-uniform CRC-valid screenshots
+  before application testing begins.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.
