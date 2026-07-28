@@ -429,17 +429,18 @@ jobs:
           test -n "$runtime"
           udid=""
           while IFS= read -r device_type; do
-            candidate="$(
+            candidate=""
+            if candidate="$(
               xcrun simctl create \
                 "Orkela-CI-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
                 "$device_type" \
                 "$runtime" \
                 2>/dev/null \
-                || true
-            )"
-            if [[ -n "$candidate" ]]; then
-              udid="$candidate"
-              break
+            )"; then
+              if [[ "$candidate" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+                udid="$candidate"
+                break
+              fi
             fi
           done < <(
             xcrun simctl list devicetypes -j \

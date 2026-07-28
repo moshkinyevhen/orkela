@@ -215,7 +215,7 @@ jobs:
             ctest --test-dir build/freebsd --output-on-failure
             mkdir -p build/freebsd/packages
             cpack --config build/freebsd/CPackConfig.cmake \
-              -G FreeBSD -B build/freebsd/packages
+              -G FREEBSD -B build/freebsd/packages
             package="$(
               find build/freebsd/packages -maxdepth 1 \
                 -name '*.pkg' -print -quit
