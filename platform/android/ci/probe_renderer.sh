@@ -1,0 +1,1382 @@
+#!/usr/bin/env bash
+
+# Probe one Android 17 host renderer without installing Orkela. This isolates
+# Emulator/guest-compositor stability from application and decoder behavior.
+
+set -u -o pipefail
+
+renderer="${1:?usage: probe_renderer.sh <renderer> [cell-id] [feature-profile]}"
+case "$renderer" in
+  swiftshader|lavapipe|swangle|host) ;;
+  *)
+    echo "Unsupported renderer: $renderer" >&2
+    exit 2
+    ;;
+esac
+cell_id="${2:-$renderer}"
+if [[ ! "$cell_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  echo "Unsafe probe cell ID: $cell_id" >&2
+  exit 2
+fi
+feature_profile="${3:-default}"
+requested_gl_direct_mem=-1
+requested_has_shared_slots=-1
+requested_gl_dma=-1
+case "$feature_profile" in
+  default)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=0
+    requested_feature_overrides=""
+    ;;
+  vulkan-native-swapchain)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=1
+    requested_feature_overrides="VulkanNativeSwapchain"
+    ;;
+  vulkan-native-swapchain-with-vulkan)
+    requested_vulkan=1
+    requested_vulkan_native_swapchain=1
+    requested_guest_vulkan_only=1
+    requested_feature_overrides="Vulkan,VulkanNativeSwapchain"
+    ;;
+  vulkan-native-swapchain-with-vulkan-guest-angle-off)
+    requested_vulkan=1
+    requested_vulkan_native_swapchain=1
+    requested_guest_vulkan_only=0
+    requested_feature_overrides="Vulkan,VulkanNativeSwapchain,-GuestAngle"
+    ;;
+  read-color-buffer-dma-off)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=0
+    requested_guest_vulkan_only=0
+    requested_gl_direct_mem=0
+    requested_has_shared_slots=0
+    requested_gl_dma=1
+    requested_feature_overrides="-GLDirectMem,-HasSharedSlotsHostMemoryAllocator,-GuestAngle,-Vulkan,-VulkanNativeSwapchain"
+    ;;
+  read-color-buffer-dma-on)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=0
+    requested_guest_vulkan_only=0
+    requested_gl_direct_mem=1
+    requested_has_shared_slots=1
+    requested_gl_dma=1
+    requested_feature_overrides="GLDirectMem,HasSharedSlotsHostMemoryAllocator,-GuestAngle,-Vulkan,-VulkanNativeSwapchain"
+    ;;
+  *)
+    echo "Unsupported Emulator feature profile: $feature_profile" >&2
+    exit 2
+    ;;
+esac
+if [[ "$feature_profile" != \
+    "vulkan-native-swapchain-with-vulkan" \
+    && "$feature_profile" != \
+      "vulkan-native-swapchain-with-vulkan-guest-angle-off" \
+    && "$feature_profile" != "read-color-buffer-dma-off" \
+    && "$feature_profile" != "read-color-buffer-dma-on" ]]; then
+  requested_guest_vulkan_only=-1
+fi
+probe_scope="${4:-soak}"
+case "$probe_scope" in
+  soak|startup) ;;
+  *)
+    echo "Unsupported probe scope: $probe_scope" >&2
+    exit 2
+    ;;
+esac
+requested_soak_seconds=120
+if [[ "$probe_scope" == "startup" ]]; then
+  requested_soak_seconds=0
+fi
+
+system_image="system-images;android-37.0;google_apis;x86_64"
+expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
+expected_emulator_version="${ORKELA_EXPECTED_EMULATOR_VERSION:-36.6.11.0}"
+expected_guest_hash_set="${ORKELA_EXPECTED_GUEST_HASH_SET:-android17-r06-google-apis-x86_64-4k-v1}"
+archive_revision="${ORKELA_EMULATOR_REVISION:-36.6.11}"
+archive_build_id="${ORKELA_EMULATOR_BUILD_ID:-15507667}"
+archive_url="${ORKELA_EMULATOR_ARCHIVE_URL:-https://dl.google.com/android/repository/emulator-linux_x64-15507667.zip}"
+archive_sha1="${ORKELA_EMULATOR_ARCHIVE_SHA1:-f8d8b83cf21a04966326eb1378bacda255f63b93}"
+archive_sha256="${ORKELA_EMULATOR_ARCHIVE_SHA256:-1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830}"
+archive_size="${ORKELA_EMULATOR_ARCHIVE_SIZE:-331232577}"
+emulator_bin="${ORKELA_EMULATOR_BIN:-$ANDROID_HOME/emulator/emulator}"
+emulator_console_port=5554
+device_serial="emulator-$emulator_console_port"
+avd_name="orkela-renderer-probe-$cell_id"
+evidence_root="${ORKELA_RENDERER_PROBE_ROOT:-build/android37-renderer-probe}"
+evidence="$evidence_root/$cell_id"
+export ANDROID_USER_HOME="${ORKELA_ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-renderer-probe-$cell_id}"
+export ANDROID_AVD_HOME="${ORKELA_ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+
+emulator_pid=""
+failure_file="$evidence/failures.txt"
+observations_file="$evidence/observations.csv"
+screenshots_json="$evidence/SCREENSHOTS.json"
+result_json="$evidence/PROBE-RESULT.json"
+guest_analysis_json="$evidence/GUEST-STARTUP-ANALYSIS.json"
+boot_completed=false
+adb_reached=false
+environment_exact=false
+stable=false
+observations=0
+healthy_observations=0
+pid_changes=0
+crash_signatures=0
+target_crash_signatures=0
+valid_screenshots=0
+initial_surfaceflinger_pid=""
+final_surfaceflinger_pid=""
+observed_fingerprint=""
+observed_selinux=""
+observed_luma=""
+observed_page_size=""
+effective_renderer_line=""
+effective_feature_count=0
+effective_vulkan_count=0
+effective_vulkan=""
+effective_vulkan_native_swapchain=""
+effective_gl_direct_mem=""
+effective_gl_direct_mem_count=0
+effective_has_shared_slots=""
+effective_has_shared_slots_count=0
+effective_gl_dma=""
+effective_gl_dma_count=0
+effective_gl_dma2=""
+effective_gl_dma2_count=0
+host_api_decision_level=""
+host_api_decision_level_count=0
+feature_exact=false
+process_started=false
+process_alive_after_probe=false
+process_exit_code=""
+startup_failure_class="none"
+startup_evidence_count=0
+startup_evidence_sha256=""
+vulkan_initialization_count=0
+vulkan_composition_enabled_count=0
+vulkan_composition_state_count=0
+vulkan_native_swapchain_enabled_count=0
+vulkan_native_swapchain_state_count=0
+guest_vulkan_only_enabled_count=0
+guest_vulkan_only_state_count=0
+surfaceflinger_angle_vk_instance_created_count=0
+guest_logcat_sha256=""
+guest_getprop_sha256=""
+guest_analysis_sha256=""
+guest_surfaceflinger_tombstones=0
+guest_coherent_memory_angle_abort_tombstones=0
+guest_updatable_crashing=""
+guest_updatable_crashing_process_name=""
+guest_boot_completed_property=""
+guest_boot_hardware_egl=""
+guest_hardware_egl=""
+guest_evidence_captured=false
+feature_override_request_count=0
+guest_angle_disabled_override_count=0
+guest_angle_auto_enabled_count=0
+compositor_vk_count=0
+host_compositor_error_count=0
+known_failing_tuple=false
+known_failure_identity=false
+stage1_candidate=false
+known_control_crash_reproduced=false
+control_crash_signature_reproduced=false
+crash_evidence_complete=false
+pre_soak_log_ok=false
+post_soak_log_ok=false
+luma_query_ok=false
+diagnostics_captured=false
+display_width=0
+display_height=0
+runner_os="${RUNNER_OS:-missing}"
+runner_arch="${RUNNER_ARCH:-missing}"
+runner_name="${RUNNER_NAME:-missing}"
+image_os="${ImageOS:-missing}"
+image_version="${ImageVersion:-missing}"
+github_run_id="${GITHUB_RUN_ID:-missing}"
+github_run_attempt="${GITHUB_RUN_ATTEMPT:-missing}"
+github_sha="${GITHUB_SHA:-missing}"
+host_kernel_release="$(uname -r)"
+host_machine="$(uname -m)"
+host_boot_id="$(
+  tr -d '\r\n' < /proc/sys/kernel/random/boot_id 2>/dev/null \
+    || echo missing
+)"
+kvm_access=false
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+  kvm_access=true
+fi
+
+mkdir -p "$evidence/logs" "$evidence/screenshots" "$ANDROID_AVD_HOME"
+: > "$failure_file"
+{
+  echo "runner_os=$runner_os"
+  echo "runner_arch=$runner_arch"
+  echo "runner_name=$runner_name"
+  echo "image_os=$image_os"
+  echo "image_version=$image_version"
+  echo "github_run_id=$github_run_id"
+  echo "github_run_attempt=$github_run_attempt"
+  echo "github_sha=$github_sha"
+  echo "kernel_release=$host_kernel_release"
+  echo "machine=$host_machine"
+  echo "boot_id=$host_boot_id"
+  echo "kvm_access=$kvm_access"
+} > "$evidence/HOST-IDENTITY.txt"
+host_identity_sha256="$(
+  sha256sum "$evidence/HOST-IDENTITY.txt" | awk '{print $1}'
+)"
+printf '%s\n' \
+  "utc,index,elapsed_seconds,healthy,surfaceflinger_pid,package,surfaceflinger,mount,storage" \
+  > "$observations_file"
+
+record_failure() {
+  printf '%s\n' "$1" >> "$failure_file"
+}
+
+capture_optional_diagnostics() {
+  timeout --signal=TERM --kill-after=3s 10s \
+    adb -s "$device_serial" shell getprop \
+    > "$evidence/logs/getprop.txt" 2>&1 || true
+  timeout --signal=TERM --kill-after=3s 10s \
+    adb -s "$device_serial" shell dumpsys SurfaceFlinger \
+    > "$evidence/logs/dumpsys-SurfaceFlinger.txt" 2>&1 || true
+  timeout --signal=TERM --kill-after=3s 10s \
+    adb -s "$device_serial" shell dumpsys display \
+    > "$evidence/logs/dumpsys-display.txt" 2>&1 || true
+  timeout --signal=TERM --kill-after=3s 15s \
+    adb -s "$device_serial" logcat -b all -d -v threadtime \
+    > "$evidence/logs/logcat-all.txt" 2>&1 || true
+  diagnostics_captured=true
+}
+
+cleanup() {
+  set +e
+  if [[ "$diagnostics_captured" != "true" ]]; then
+    capture_optional_diagnostics
+  fi
+  timeout --signal=TERM --kill-after=5s 15s \
+    adb -s "$device_serial" emu kill >/dev/null 2>&1
+  if [[ -n "$emulator_pid" ]]; then
+    if ! timeout --signal=TERM --kill-after=5s 15s \
+        tail --pid="$emulator_pid" -f /dev/null; then
+      kill "$emulator_pid" >/dev/null 2>&1
+      sleep 1
+      kill -9 "$emulator_pid" >/dev/null 2>&1
+    fi
+    wait "$emulator_pid" >/dev/null 2>&1
+  fi
+  "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+    delete avd --name "$avd_name" >/dev/null 2>&1
+}
+trap cleanup EXIT
+
+emulator_version="$(
+  "$emulator_bin" -version 2>&1 \
+    | tee "$evidence/EMULATOR-VERSION.txt" \
+    | sed -n 's/^.*Android emulator version \([^ ]*\).*/\1/p' \
+    | head -n 1
+)"
+if [[ "$emulator_version" != "$expected_emulator_version" ]]; then
+  record_failure \
+    "emulator-version:${emulator_version:-missing}:expected:$expected_emulator_version"
+fi
+
+printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+  create avd \
+  --force \
+  --name "$avd_name" \
+  --package "$system_image" \
+  --device "pixel_2" \
+  --path "$ANDROID_AVD_HOME/$avd_name.avd" \
+  > "$evidence/logs/avd-create.txt" 2>&1
+if [[ "$?" -ne 0 ]]; then
+  record_failure "avd-create"
+fi
+
+adb start-server > "$evidence/logs/adb-start-server.txt" 2>&1 || true
+emulator_args=(
+  "@$avd_name"
+  -no-window
+  -no-boot-anim
+  -no-snapshot
+  -no-audio
+  -accel on
+  -cores 2
+  -memory 4096
+  -partition-size 4096
+  -gpu "$renderer"
+  -port "$emulator_console_port"
+  -verbose
+)
+if [[ "$feature_profile" == "vulkan-native-swapchain" ]]; then
+  emulator_args+=(-feature VulkanNativeSwapchain)
+elif [[ "$feature_profile" == \
+    "vulkan-native-swapchain-with-vulkan" ]]; then
+  emulator_args+=(-feature Vulkan,VulkanNativeSwapchain)
+elif [[ "$feature_profile" == \
+    "vulkan-native-swapchain-with-vulkan-guest-angle-off" ]]; then
+  emulator_args+=(
+    -feature
+    Vulkan,VulkanNativeSwapchain,-GuestAngle
+  )
+elif [[ "$feature_profile" == "read-color-buffer-dma-off" \
+    || "$feature_profile" == "read-color-buffer-dma-on" ]]; then
+  emulator_args+=(-feature "$requested_feature_overrides")
+fi
+printf '%q ' "$emulator_bin" "${emulator_args[@]}" \
+  > "$evidence/EMULATOR-COMMAND.txt"
+printf '\n' >> "$evidence/EMULATOR-COMMAND.txt"
+"$emulator_bin" "${emulator_args[@]}" \
+  > "$evidence/logs/emulator.log" 2>&1 &
+emulator_pid="$!"
+process_started=true
+
+device_seen=false
+device_deadline=$((SECONDS + 345))
+while ((SECONDS < device_deadline)); do
+  timeout --signal=TERM --kill-after=5s 10s \
+    adb devices -l > "$evidence/logs/adb-devices.txt" 2>&1 || true
+  if awk \
+      -v expected="$device_serial" \
+      '$1 == expected && $2 == "device" { found = 1 }
+       END { exit !found }' \
+      "$evidence/logs/adb-devices.txt"; then
+    device_seen=true
+    adb_reached=true
+    break
+  fi
+  if ! kill -0 "$emulator_pid" 2>/dev/null; then
+    record_failure "emulator-exited-before-adb"
+    break
+  fi
+  sleep 2
+done
+if [[ "$device_seen" != "true" ]]; then
+  record_failure "adb-device-timeout"
+else
+  boot_deadline=$((SECONDS + 285))
+  while ((SECONDS < boot_deadline)); do
+    boot_property="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell getprop sys.boot_completed \
+        2>/dev/null \
+        | tr -d '\r' \
+        || true
+    )"
+    if [[ "$boot_property" == "1" ]]; then
+      boot_completed=true
+      break
+    fi
+    if ! kill -0 "$emulator_pid" 2>/dev/null; then
+      record_failure "emulator-exited-before-boot"
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$boot_completed" != "true" ]] \
+      && kill -0 "$emulator_pid" 2>/dev/null; then
+    record_failure "boot-completion-timeout"
+  fi
+fi
+
+if [[ "$boot_completed" == "true" ]]; then
+  if timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell \
+        getprop ro.build.fingerprint \
+        > "$evidence/logs/fingerprint.txt" 2>&1; then
+    observed_fingerprint="$(
+      tr -d '\r' < "$evidence/logs/fingerprint.txt"
+    )"
+  else
+    record_failure "fingerprint-query"
+  fi
+  if timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell getenforce \
+        > "$evidence/logs/selinux.txt" 2>&1; then
+    observed_selinux="$(tr -d '\r' < "$evidence/logs/selinux.txt")"
+  else
+    record_failure "selinux-query"
+  fi
+  if timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell \
+        getprop debug.sf.luma_sampling \
+        > "$evidence/logs/luma-sampling.txt" 2>&1; then
+    luma_query_ok=true
+    observed_luma="$(
+      tr -d '\r' < "$evidence/logs/luma-sampling.txt"
+    )"
+  else
+    record_failure "luma-sampling-query"
+  fi
+  if timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell getconf PAGE_SIZE \
+        > "$evidence/logs/page-size.txt" 2>&1; then
+    observed_page_size="$(
+      tr -d '\r' < "$evidence/logs/page-size.txt"
+    )"
+  else
+    record_failure "page-size-query"
+  fi
+  if timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell wm size \
+        > "$evidence/logs/wm-size.txt" 2>&1; then
+    display_dimensions="$(
+      sed -n \
+        's/^Physical size: \([0-9][0-9]*\)x\([0-9][0-9]*\)$/\1 \2/p' \
+        "$evidence/logs/wm-size.txt" \
+        | head -n 1
+    )"
+    if [[ -n "$display_dimensions" ]]; then
+      read -r display_width display_height <<< "$display_dimensions"
+    else
+      record_failure "display-size-parse"
+    fi
+  else
+    record_failure "display-size-query"
+  fi
+  {
+    echo "cell_id=$cell_id"
+    echo "requested_renderer=$renderer"
+    echo "requested_feature_profile=$feature_profile"
+    echo "requested_vulkan_native_swapchain=$requested_vulkan_native_swapchain"
+    echo "fingerprint=$observed_fingerprint"
+    echo "selinux=$observed_selinux"
+    echo "luma_sampling=${observed_luma:-default}"
+    echo "page_size=$observed_page_size"
+    echo "display_size=${display_width}x${display_height}"
+    echo "emulator_revision=$archive_revision"
+    echo "emulator_build_id=$archive_build_id"
+    echo "emulator_archive_url=$archive_url"
+    echo "emulator_archive_sha1=$archive_sha1"
+    echo "emulator_archive_sha256=$archive_sha256"
+    echo "emulator_archive_size=$archive_size"
+    echo "emulator_archive_verified=${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-false}"
+    echo "guest_hash_set=${ORKELA_GUEST_HASH_SET:-missing}"
+    echo "system_image_hashes_verified=${ORKELA_IMAGE_HASHES_VERIFIED:-false}"
+  } > "$evidence/GUEST-ENVIRONMENT.txt"
+  if [[ "$observed_fingerprint" != "$expected_fingerprint" ]]; then
+    record_failure "fingerprint-mismatch"
+  fi
+  if [[ "$observed_selinux" != "Enforcing" ]]; then
+    record_failure "selinux-not-enforcing"
+  fi
+  if [[ "$luma_query_ok" != "true" ]]; then
+    record_failure "luma-sampling-not-default-enabled"
+  elif [[ -n "$observed_luma" && "$observed_luma" != "1" ]]; then
+    record_failure "luma-sampling-not-default-enabled"
+  fi
+  if [[ "$observed_page_size" != "4096" ]]; then
+    record_failure "page-size-not-4096"
+  fi
+  luma_exact=false
+  if [[ "$luma_query_ok" == "true" ]]; then
+    if [[ -z "$observed_luma" || "$observed_luma" == "1" ]]; then
+      luma_exact=true
+    fi
+  fi
+  if [[ "$emulator_version" == "$expected_emulator_version" \
+      && "$observed_fingerprint" == "$expected_fingerprint" \
+      && "$observed_selinux" == "Enforcing" \
+      && "$luma_exact" == "true" \
+      && "$observed_page_size" == "4096" \
+      && "$display_width" -gt 0 \
+      && "$display_height" -gt 0 \
+      && "${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-false}" == "true" \
+      && "${ORKELA_GUEST_HASH_SET:-missing}" == "$expected_guest_hash_set" \
+      && "${ORKELA_IMAGE_HASHES_VERIFIED:-false}" == "true" ]]; then
+    environment_exact=true
+  fi
+
+  if [[ "$probe_scope" == "soak" ]]; then
+    if timeout --signal=TERM --kill-after=3s 15s \
+      adb -s "$device_serial" logcat -b all -d -v threadtime \
+      > "$evidence/logs/logcat-pre-soak.txt" 2>&1; then
+      pre_soak_log_ok=true
+    else
+      record_failure "pre-soak-logcat-capture"
+    fi
+    initial_surfaceflinger_pid="$(
+    timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell pidof surfaceflinger \
+      2>/dev/null | tr -d '\r' || true
+  )"
+  if [[ -z "$initial_surfaceflinger_pid" ]]; then
+    record_failure "surfaceflinger-pid-missing-at-soak-start"
+  fi
+  soak_started="$SECONDS"
+  timeout --signal=TERM --kill-after=3s 10s \
+    adb -s "$device_serial" exec-out screencap -p \
+    > "$evidence/screenshots/soak-1.png" \
+    2> "$evidence/logs/screencap-1.txt" \
+    || true
+  for index in $(seq 1 24); do
+    target_elapsed=$((index * 5))
+    now_elapsed=$((SECONDS - soak_started))
+    if ((now_elapsed < target_elapsed)); then
+      sleep $((target_elapsed - now_elapsed))
+    fi
+    observation="$(
+      timeout --signal=TERM --kill-after=3s 8s \
+        adb -s "$device_serial" shell '
+          echo "PID=$(pidof surfaceflinger)"
+          service check package
+          service check SurfaceFlinger
+          service check mount
+          sm list-volumes all
+        ' 2>&1 \
+        | tr -d '\r' \
+        || true
+    )"
+    surfaceflinger_pid="$(
+      sed -n 's/^PID=//p' <<< "$observation" | head -n 1
+    )"
+    package_ok=0
+    surfaceflinger_ok=0
+    mount_ok=0
+    storage_ok=0
+    grep -Fq "Service package: found" <<< "$observation" \
+      && package_ok=1
+    grep -Fq "Service SurfaceFlinger: found" <<< "$observation" \
+      && surfaceflinger_ok=1
+    grep -Fq "Service mount: found" <<< "$observation" \
+      && mount_ok=1
+    if grep -Eq "^private mounted([[:space:]]|$)" <<< "$observation" \
+        && grep -Eq "^emulated;0 mounted([[:space:]]|$)" \
+          <<< "$observation"; then
+      storage_ok=1
+    fi
+    if [[ -n "$initial_surfaceflinger_pid" \
+        && "$surfaceflinger_pid" != "$initial_surfaceflinger_pid" ]]; then
+      pid_changes=$((pid_changes + 1))
+    fi
+    healthy=0
+    if [[ -n "$surfaceflinger_pid" \
+        && "$package_ok" -eq 1 \
+        && "$surfaceflinger_ok" -eq 1 \
+        && "$mount_ok" -eq 1 \
+        && "$storage_ok" -eq 1 ]]; then
+      healthy=1
+      healthy_observations=$((healthy_observations + 1))
+    fi
+    observations=$((observations + 1))
+    printf '%s,%d,%d,%d,%s,%d,%d,%d,%d\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$index" \
+      "$((SECONDS - soak_started))" \
+      "$healthy" \
+      "${surfaceflinger_pid:-missing}" \
+      "$package_ok" \
+      "$surfaceflinger_ok" \
+      "$mount_ok" \
+      "$storage_ok" \
+      >> "$observations_file"
+    case "$index" in
+      7|14|22)
+        screenshot_index="$(
+          case "$index" in
+            7) echo 2 ;;
+            14) echo 3 ;;
+            22) echo 4 ;;
+          esac
+        )"
+        timeout --signal=TERM --kill-after=3s 10s \
+          adb -s "$device_serial" exec-out screencap -p \
+          > "$evidence/screenshots/soak-$screenshot_index.png" \
+          2> "$evidence/logs/screencap-$screenshot_index.txt" \
+          || true
+        ;;
+    esac
+  done
+
+  final_surfaceflinger_pid="$(
+    timeout --signal=TERM --kill-after=3s 10s \
+      adb -s "$device_serial" shell pidof surfaceflinger \
+      2>/dev/null | tr -d '\r' || true
+  )"
+  if timeout --signal=TERM --kill-after=3s 15s \
+      adb -s "$device_serial" logcat -b all -d -v threadtime \
+      > "$evidence/logs/logcat-soak.txt" 2>&1; then
+    post_soak_log_ok=true
+  else
+    record_failure "post-soak-logcat-capture"
+  fi
+  if [[ "$pre_soak_log_ok" == "true" \
+      && "$post_soak_log_ok" == "true" ]]; then
+    crash_evidence_complete=true
+  fi
+  crash_signatures="$(
+    {
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.*(fatal|crash)|Fatal signal.*surfaceflinger' \
+        "$evidence/logs/emulator.log" || true
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.*(fatal|crash)|Fatal signal.*surfaceflinger' \
+        "$evidence/logs/logcat-pre-soak.txt" || true
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.*(fatal|crash)|Fatal signal.*surfaceflinger' \
+        "$evidence/logs/logcat-soak.txt" || true
+    } | awk '{ total += $1 } END { print total + 0 }'
+  )"
+  target_crash_signatures="$(
+    {
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma' \
+        "$evidence/logs/emulator.log" || true
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma' \
+        "$evidence/logs/logcat-pre-soak.txt" || true
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma' \
+        "$evidence/logs/logcat-soak.txt" || true
+    } | awk '{ total += $1 } END { print total + 0 }'
+  )"
+  if [[ "$crash_evidence_complete" == "true" ]] \
+      && grep -Fq \
+      "GoldfishMapper::readFromHost" \
+      "$evidence/logs/emulator.log" \
+      "$evidence/logs/logcat-pre-soak.txt" \
+      "$evidence/logs/logcat-soak.txt" \
+      && grep -Fq \
+        "hasReadColorBufferDma" \
+        "$evidence/logs/emulator.log" \
+        "$evidence/logs/logcat-pre-soak.txt" \
+        "$evidence/logs/logcat-soak.txt"; then
+    control_crash_signature_reproduced=true
+  fi
+  if python3 platform/android/ci/validate_probe_pngs.py \
+      "$evidence/screenshots/soak-1.png" \
+      "$evidence/screenshots/soak-2.png" \
+      "$evidence/screenshots/soak-3.png" \
+      "$evidence/screenshots/soak-4.png" \
+      --expected-width "$display_width" \
+      --expected-height "$display_height" \
+      --output "$screenshots_json" \
+      > "$evidence/logs/png-validation.txt" 2>&1; then
+    valid_screenshots=4
+  else
+    record_failure "screenshot-validation"
+  fi
+  if [[ "$observations" -ne 24 ]]; then
+    record_failure "observation-count:$observations"
+  fi
+  if [[ "$healthy_observations" -ne 24 ]]; then
+    record_failure "unhealthy-observations:$healthy_observations"
+  fi
+  if [[ -z "$initial_surfaceflinger_pid" \
+      || "$final_surfaceflinger_pid" != "$initial_surfaceflinger_pid" \
+      || "$pid_changes" -ne 0 ]]; then
+    record_failure "surfaceflinger-pid-instability"
+  fi
+    if [[ "$crash_signatures" -ne 0 ]]; then
+      record_failure "surfaceflinger-crash-signatures:$crash_signatures"
+    fi
+  fi
+fi
+
+if [[ "$adb_reached" == "true" ]]; then
+  # Capture the raw guest state before classification. Cleanup must not
+  # overwrite these files after their hashes have entered PROBE-RESULT.json.
+  capture_optional_diagnostics
+  if python3 platform/android/ci/analyze_guest_boot_evidence.py \
+      "$evidence/logs/logcat-all.txt" \
+      "$evidence/logs/getprop.txt" \
+      "$guest_analysis_json"; then
+    guest_evidence_captured=true
+    guest_logcat_sha256="$(
+      sha256sum "$evidence/logs/logcat-all.txt" | awk '{print $1}'
+    )"
+    guest_getprop_sha256="$(
+      sha256sum "$evidence/logs/getprop.txt" | awk '{print $1}'
+    )"
+    guest_analysis_sha256="$(
+      sha256sum "$guest_analysis_json" | awk '{print $1}'
+    )"
+    guest_surfaceflinger_tombstones="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["surfaceflinger_abort_tombstones"])' \
+        "$guest_analysis_json"
+    )"
+    guest_coherent_memory_angle_abort_tombstones="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["coherent_memory_angle_abort_tombstones"])' \
+        "$guest_analysis_json"
+    )"
+    guest_updatable_crashing="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["updatable_crashing_property"])' \
+        "$guest_analysis_json"
+    )"
+    guest_updatable_crashing_process_name="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["updatable_crashing_process_name"])' \
+        "$guest_analysis_json"
+    )"
+    guest_boot_completed_property="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["boot_completed_property"])' \
+        "$guest_analysis_json"
+    )"
+    guest_boot_hardware_egl="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["boot_hardware_egl"])' \
+        "$guest_analysis_json"
+    )"
+    guest_hardware_egl="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["hardware_egl"])' \
+        "$guest_analysis_json"
+    )"
+    if [[ -z "$observed_fingerprint" ]]; then
+      observed_fingerprint="$(
+        python3 -c \
+          'import json,sys; print(json.load(open(sys.argv[1]))["observed_fingerprint"])' \
+          "$guest_analysis_json"
+      )"
+    fi
+  else
+    record_failure "guest-startup-evidence-analysis"
+  fi
+fi
+
+grep -E \
+  'Graphics Adapter|GPU mode|Vulkan|GLDirectMem|GlDma|HasSharedSlots|Renderer|renderer' \
+  "$evidence/logs/emulator.log" \
+  > "$evidence/HOST-GRAPHICS-TUPLE.txt" || true
+grep 'setCurrentRenderer:' "$evidence/logs/emulator.log" \
+  | sed 's/^[^|]*|[[:space:]]*//' \
+  | sort -u \
+  > "$evidence/EFFECTIVE-RENDERER-TUPLES.txt" || true
+effective_renderer_count="$(
+  awk 'NF { count += 1 } END { print count + 0 }' \
+    "$evidence/EFFECTIVE-RENDERER-TUPLES.txt"
+)"
+effective_renderer_line="$(
+  paste -sd ';' "$evidence/EFFECTIVE-RENDERER-TUPLES.txt"
+)"
+if [[ "$effective_renderer_count" -ne 1 ]]; then
+  record_failure "effective-renderer-tuple-count:$effective_renderer_count"
+fi
+grep -E \
+  'gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GlDirectMem|HasSharedSlotsHostMemoryAllocator|GlDma|GlDma2)[[:space:]]*=[[:space:]]*[01][[:space:]]*$' \
+  "$evidence/logs/emulator.log" \
+  > "$evidence/HOST-FEATURE-STATE.txt" || true
+effective_feature_count="$(
+  grep -Ec \
+    'gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_vulkan_count="$(
+  grep -Ec \
+    'gfxstreamFeature:Vulkan[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_vulkan="$(
+  sed -n \
+    's/^.*gfxstreamFeature:Vulkan[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_vulkan_native_swapchain="$(
+  sed -n \
+    's/^.*gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_gl_direct_mem_count="$(
+  grep -Ec 'gfxstreamFeature:GlDirectMem[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_gl_direct_mem="$(
+  sed -n \
+    's/^.*gfxstreamFeature:GlDirectMem[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_has_shared_slots_count="$(
+  grep -Ec \
+    'gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_has_shared_slots="$(
+  sed -n \
+    's/^.*gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_gl_dma_count="$(
+  grep -Ec 'gfxstreamFeature:GlDma[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_gl_dma="$(
+  sed -n \
+    's/^.*gfxstreamFeature:GlDma[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_gl_dma2_count="$(
+  grep -Ec 'gfxstreamFeature:GlDma2[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_gl_dma2="$(
+  sed -n \
+    's/^.*gfxstreamFeature:GlDma2[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+host_api_decision_level="$(
+  sed -n \
+    's/^.*Deciding if GLDirectMem\/Vulkan should be enabled.*API level: \([0-9][0-9]*\).*$/\1/p' \
+    "$evidence/logs/emulator.log"
+)"
+host_api_decision_level_count="$(
+  sed -n \
+    's/^.*Deciding if GLDirectMem\/Vulkan should be enabled.*API level: \([0-9][0-9]*\).*$/\1/p' \
+    "$evidence/logs/emulator.log" \
+    | awk 'NF { count += 1 } END { print count + 0 }'
+)"
+if [[ "$effective_feature_count" -ne 1 ]]; then
+  record_failure \
+    "vulkan-native-swapchain-state-count:$effective_feature_count"
+elif [[ "$effective_vulkan_native_swapchain" \
+    != "$requested_vulkan_native_swapchain" ]]; then
+  record_failure \
+    "vulkan-native-swapchain-state:$effective_vulkan_native_swapchain:expected:$requested_vulkan_native_swapchain"
+elif [[ "$effective_vulkan_count" -ne 1 ]]; then
+  record_failure "vulkan-state-count:$effective_vulkan_count"
+elif [[ "$effective_vulkan" != "$requested_vulkan" ]]; then
+  record_failure \
+    "vulkan-state:$effective_vulkan:expected:$requested_vulkan"
+else
+  feature_exact=true
+fi
+if [[ "$feature_profile" == "read-color-buffer-dma-off" \
+    || "$feature_profile" == "read-color-buffer-dma-on" ]]; then
+  feature_exact=false
+  if [[ "$effective_feature_count" -eq 1 \
+      && "$effective_vulkan_count" -eq 1 \
+      && "$effective_vulkan" == "$requested_vulkan" \
+      && "$effective_vulkan_native_swapchain" \
+        == "$requested_vulkan_native_swapchain" \
+      && "$effective_gl_direct_mem_count" -eq 1 \
+      && "$effective_gl_direct_mem" == "$requested_gl_direct_mem" \
+      && "$effective_has_shared_slots_count" -eq 1 \
+      && "$effective_has_shared_slots" == "$requested_has_shared_slots" \
+      && "$effective_gl_dma_count" -eq 1 \
+      && "$effective_gl_dma" == "$requested_gl_dma" \
+      && "$effective_gl_dma2_count" -eq 1 \
+      && "$host_api_decision_level_count" -eq 1 \
+      && "$host_api_decision_level" == "3" ]]; then
+    feature_exact=true
+  fi
+fi
+
+# Preserve a deterministic account of failures that happen before ADB. These
+# cells are valid negative evidence only when both the process state and the
+# normalized host failure signature are present.
+startup_evidence_file="$evidence/STARTUP-FAILURE-EVIDENCE.txt"
+grep -E \
+  "parseAndApplyOverrides, overrides=|Feature '(GuestAngle|GLDirectMem|HasSharedSlotsHostMemoryAllocator)'.*overridden to '(enabled|disabled)'|Auto-enabled GuestAngle feature for VulkanNativeSwapchain|gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GuestVulkanOnly|GlDirectMem|HasSharedSlotsHostMemoryAllocator|GlDma|GlDma2)[[:space:]]*=|Deciding if GLDirectMem/Vulkan should be enabled|Initializing VkEmulation features|useVulkanComposition:[[:space:]]*(true|false)|useVulkanNativeSwapchain:[[:space:]]*(true|false)|Performing composition using CompositorVk|Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
+  "$evidence/logs/emulator.log" \
+  | sed -E 's/^[^|]*\|[[:space:]]*//' \
+  > "$startup_evidence_file" || true
+startup_evidence_count="$(
+  awk 'NF { count += 1 } END { print count + 0 }' "$startup_evidence_file"
+)"
+startup_evidence_sha256="$(
+  sha256sum "$startup_evidence_file" | awk '{print $1}'
+)"
+feature_override_request_count="$(
+  grep -Fxc \
+    "parseAndApplyOverrides, overrides='$requested_feature_overrides'" \
+    "$startup_evidence_file" || true
+)"
+guest_angle_disabled_override_count="$(
+  grep -Ec \
+    "Feature 'GuestAngle'.*overridden to 'disabled'" \
+    "$startup_evidence_file" || true
+)"
+guest_angle_auto_enabled_count="$(
+  grep -Fc \
+    "Auto-enabled GuestAngle feature for VulkanNativeSwapchain" \
+    "$startup_evidence_file" || true
+)"
+vulkan_initialization_count="$(
+  grep -Fc 'Initializing VkEmulation features' \
+    "$startup_evidence_file" || true
+)"
+vulkan_composition_enabled_count="$(
+  grep -Ec 'useVulkanComposition:[[:space:]]*true' \
+    "$startup_evidence_file" || true
+)"
+vulkan_composition_state_count="$(
+  grep -Ec 'useVulkanComposition:[[:space:]]*(true|false)' \
+    "$startup_evidence_file" || true
+)"
+vulkan_native_swapchain_enabled_count="$(
+  grep -Ec 'useVulkanNativeSwapchain:[[:space:]]*true' \
+    "$startup_evidence_file" || true
+)"
+vulkan_native_swapchain_state_count="$(
+  grep -Ec 'useVulkanNativeSwapchain:[[:space:]]*(true|false)' \
+    "$startup_evidence_file" || true
+)"
+guest_vulkan_only_enabled_count="$(
+  grep -Ec \
+    'gfxstreamFeature:GuestVulkanOnly[[:space:]]*=[[:space:]]*1' \
+    "$startup_evidence_file" || true
+)"
+guest_vulkan_only_state_count="$(
+  grep -Ec \
+    'gfxstreamFeature:GuestVulkanOnly[[:space:]]*=[[:space:]]*[01]' \
+    "$startup_evidence_file" || true
+)"
+surfaceflinger_angle_vk_instance_created_count="$(
+  grep -Ec \
+    "Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'" \
+    "$startup_evidence_file" || true
+)"
+compositor_vk_count="$(
+  grep -Fc 'Performing composition using CompositorVk' \
+    "$startup_evidence_file" || true
+)"
+host_compositor_error_count="$(
+  grep -Ec \
+    'Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer' \
+    "$startup_evidence_file" || true
+)"
+if [[ "$host_compositor_error_count" -ge 3 \
+    && "$boot_completed" == "false" ]]; then
+  startup_failure_class="host-compositor-init-error"
+elif [[ "$adb_reached" == "true" \
+    && "$boot_completed" == "false" \
+    && "$guest_evidence_captured" == "true" \
+    && "$guest_coherent_memory_angle_abort_tombstones" -ge 2 \
+    && "$guest_updatable_crashing" == "1" \
+    && "$guest_updatable_crashing_process_name" == "surfaceflinger" ]]; then
+  startup_failure_class="guest-surfaceflinger-vulkan-coherent-memory-abort-loop"
+  record_failure \
+    "guest-surfaceflinger-vulkan-coherent-memory-abort-loop"
+elif grep -Fq "emulator-exited-before-adb" "$failure_file"; then
+  startup_failure_class="emulator-exited-before-adb"
+elif grep -Fq "adb-device-timeout" "$failure_file"; then
+  startup_failure_class="adb-device-timeout"
+elif grep -Fq "boot-completion-timeout" "$failure_file"; then
+  startup_failure_class="boot-completion-timeout"
+fi
+if kill -0 "$emulator_pid" 2>/dev/null; then
+  process_alive_after_probe=true
+else
+  set +e
+  wait "$emulator_pid"
+  process_exit_code="$?"
+  set -u -o pipefail
+fi
+# A known failure is scoped by the full causal environment. A newer Emulator
+# remains eligible even when it reports the same human-readable renderer tuple.
+if [[ ( "$cell_id" == "control-36_6_11-swiftshader" \
+      || "$cell_id" == "swiftshader" ) \
+    && "$renderer" == "swiftshader" \
+    && "$emulator_version" == "36.6.11.0" \
+    && "$archive_sha256" == \
+      "1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830" \
+    && "$effective_vulkan_native_swapchain" == "0" ]]; then
+  known_failure_identity=true
+fi
+if [[ "$cell_id" == "control-37_2_1-swiftshader-feature-off" \
+    && "$renderer" == "swiftshader" \
+    && "$emulator_version" == "37.2.1.0" \
+    && "$archive_sha256" == \
+      "3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d" \
+    && "$effective_vulkan_native_swapchain" == "0" ]]; then
+  known_failure_identity=true
+fi
+if [[ "$known_failure_identity" == "true" \
+    && "${ORKELA_GUEST_HASH_SET:-missing}" == \
+      "android17-r06-google-apis-x86_64-4k-v1" \
+    && "$effective_renderer_count" -eq 1 ]] \
+    && grep -Fq \
+      "setCurrentRenderer: swiftshader swiftshader" \
+      "$evidence/EFFECTIVE-RENDERER-TUPLES.txt"; then
+  known_failing_tuple=true
+  if [[ "$environment_exact" == "true" \
+      && "$crash_evidence_complete" == "true" \
+      && "$control_crash_signature_reproduced" == "true" ]]; then
+    known_control_crash_reproduced=true
+  fi
+fi
+
+if [[ "$environment_exact" == "true" \
+    && "$observations" -eq 24 \
+    && "$healthy_observations" -eq 24 \
+    && "$pid_changes" -eq 0 \
+    && "$crash_signatures" -eq 0 \
+    && "$valid_screenshots" -eq 4 \
+    && -n "$initial_surfaceflinger_pid" \
+    && "$final_surfaceflinger_pid" == "$initial_surfaceflinger_pid" \
+    && ! -s "$failure_file" ]]; then
+  stable=true
+fi
+deterministic_candidate=false
+if [[ "$cell_id" == candidate-* && "$renderer" != "host" ]] \
+    || [[ "$cell_id" == "$renderer" \
+      && ( "$renderer" == "lavapipe" || "$renderer" == "swangle" ) ]]; then
+  deterministic_candidate=true
+fi
+if [[ "$stable" == "true" \
+    && "$deterministic_candidate" == "true" \
+    && "$known_failing_tuple" == "false" ]]; then
+  stage1_candidate=true
+fi
+
+CELL_ID="$cell_id" \
+RENDERER="$renderer" \
+PROBE_SCOPE="$probe_scope" \
+REQUESTED_SOAK_SECONDS="$requested_soak_seconds" \
+FEATURE_PROFILE="$feature_profile" \
+REQUESTED_FEATURE_OVERRIDES="$requested_feature_overrides" \
+REQUESTED_VULKAN="$requested_vulkan" \
+REQUESTED_VULKAN_NATIVE_SWAPCHAIN="$requested_vulkan_native_swapchain" \
+REQUESTED_GUEST_VULKAN_ONLY="$requested_guest_vulkan_only" \
+REQUESTED_GL_DIRECT_MEM="$requested_gl_direct_mem" \
+REQUESTED_HAS_SHARED_SLOTS="$requested_has_shared_slots" \
+REQUESTED_GL_DMA="$requested_gl_dma" \
+EFFECTIVE_VULKAN="$effective_vulkan" \
+EFFECTIVE_VULKAN_COUNT="$effective_vulkan_count" \
+EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN="$effective_vulkan_native_swapchain" \
+EFFECTIVE_FEATURE_COUNT="$effective_feature_count" \
+EFFECTIVE_GL_DIRECT_MEM="$effective_gl_direct_mem" \
+EFFECTIVE_GL_DIRECT_MEM_COUNT="$effective_gl_direct_mem_count" \
+EFFECTIVE_HAS_SHARED_SLOTS="$effective_has_shared_slots" \
+EFFECTIVE_HAS_SHARED_SLOTS_COUNT="$effective_has_shared_slots_count" \
+EFFECTIVE_GL_DMA="$effective_gl_dma" \
+EFFECTIVE_GL_DMA_COUNT="$effective_gl_dma_count" \
+EFFECTIVE_GL_DMA2="$effective_gl_dma2" \
+EFFECTIVE_GL_DMA2_COUNT="$effective_gl_dma2_count" \
+HOST_API_DECISION_LEVEL="$host_api_decision_level" \
+HOST_API_DECISION_LEVEL_COUNT="$host_api_decision_level_count" \
+FEATURE_EXACT="$feature_exact" \
+PROCESS_STARTED="$process_started" \
+PROCESS_ALIVE_AFTER_PROBE="$process_alive_after_probe" \
+PROCESS_EXIT_CODE="$process_exit_code" \
+STARTUP_FAILURE_CLASS="$startup_failure_class" \
+STARTUP_EVIDENCE_COUNT="$startup_evidence_count" \
+STARTUP_EVIDENCE_SHA256="$startup_evidence_sha256" \
+VULKAN_INITIALIZATION_COUNT="$vulkan_initialization_count" \
+VULKAN_COMPOSITION_ENABLED_COUNT="$vulkan_composition_enabled_count" \
+VULKAN_COMPOSITION_STATE_COUNT="$vulkan_composition_state_count" \
+VULKAN_NATIVE_SWAPCHAIN_ENABLED_COUNT="$vulkan_native_swapchain_enabled_count" \
+VULKAN_NATIVE_SWAPCHAIN_STATE_COUNT="$vulkan_native_swapchain_state_count" \
+GUEST_VULKAN_ONLY_ENABLED_COUNT="$guest_vulkan_only_enabled_count" \
+GUEST_VULKAN_ONLY_STATE_COUNT="$guest_vulkan_only_state_count" \
+SURFACEFLINGER_ANGLE_VK_INSTANCE_CREATED_COUNT="$surfaceflinger_angle_vk_instance_created_count" \
+GUEST_LOGCAT_SHA256="$guest_logcat_sha256" \
+GUEST_GETPROP_SHA256="$guest_getprop_sha256" \
+GUEST_ANALYSIS_SHA256="$guest_analysis_sha256" \
+GUEST_SURFACEFLINGER_TOMBSTONES="$guest_surfaceflinger_tombstones" \
+GUEST_COHERENT_MEMORY_ANGLE_ABORT_TOMBSTONES="$guest_coherent_memory_angle_abort_tombstones" \
+GUEST_UPDATABLE_CRASHING="$guest_updatable_crashing" \
+GUEST_UPDATABLE_CRASHING_PROCESS_NAME="$guest_updatable_crashing_process_name" \
+GUEST_BOOT_COMPLETED_PROPERTY="$guest_boot_completed_property" \
+GUEST_BOOT_HARDWARE_EGL="$guest_boot_hardware_egl" \
+GUEST_HARDWARE_EGL="$guest_hardware_egl" \
+GUEST_EVIDENCE_CAPTURED="$guest_evidence_captured" \
+FEATURE_OVERRIDE_REQUEST_COUNT="$feature_override_request_count" \
+GUEST_ANGLE_DISABLED_OVERRIDE_COUNT="$guest_angle_disabled_override_count" \
+GUEST_ANGLE_AUTO_ENABLED_COUNT="$guest_angle_auto_enabled_count" \
+COMPOSITOR_VK_COUNT="$compositor_vk_count" \
+HOST_COMPOSITOR_ERROR_COUNT="$host_compositor_error_count" \
+RUNNER_OS_VALUE="$runner_os" \
+RUNNER_ARCH_VALUE="$runner_arch" \
+RUNNER_NAME_VALUE="$runner_name" \
+IMAGE_OS_VALUE="$image_os" \
+IMAGE_VERSION_VALUE="$image_version" \
+GITHUB_RUN_ID_VALUE="$github_run_id" \
+GITHUB_RUN_ATTEMPT_VALUE="$github_run_attempt" \
+GITHUB_SHA_VALUE="$github_sha" \
+HOST_KERNEL_RELEASE="$host_kernel_release" \
+HOST_MACHINE="$host_machine" \
+HOST_BOOT_ID="$host_boot_id" \
+HOST_IDENTITY_SHA256="$host_identity_sha256" \
+KVM_ACCESS="$kvm_access" \
+ANDROID_USER_HOME_VALUE="$ANDROID_USER_HOME" \
+ANDROID_AVD_HOME_VALUE="$ANDROID_AVD_HOME" \
+AVD_NAME_VALUE="$avd_name" \
+EXPECTED_EMULATOR_VERSION="$expected_emulator_version" \
+EMULATOR_VERSION="$emulator_version" \
+ARCHIVE_REVISION="$archive_revision" \
+ARCHIVE_BUILD_ID="$archive_build_id" \
+ARCHIVE_URL="$archive_url" \
+ARCHIVE_SHA1="$archive_sha1" \
+ARCHIVE_SHA256="$archive_sha256" \
+ARCHIVE_SIZE="$archive_size" \
+ARCHIVE_VERIFIED="${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-false}" \
+EXPECTED_GUEST_HASH_SET="$expected_guest_hash_set" \
+GUEST_HASH_SET="${ORKELA_GUEST_HASH_SET:-missing}" \
+EXPECTED_FINGERPRINT="$expected_fingerprint" \
+OBSERVED_FINGERPRINT="$observed_fingerprint" \
+OBSERVED_SELINUX="$observed_selinux" \
+OBSERVED_LUMA="$observed_luma" \
+OBSERVED_PAGE_SIZE="$observed_page_size" \
+BOOT_COMPLETED="$boot_completed" \
+ADB_REACHED="$adb_reached" \
+ENVIRONMENT_EXACT="$environment_exact" \
+STABLE="$stable" \
+OBSERVATIONS="$observations" \
+HEALTHY_OBSERVATIONS="$healthy_observations" \
+PID_CHANGES="$pid_changes" \
+INITIAL_SURFACEFLINGER_PID="$initial_surfaceflinger_pid" \
+FINAL_SURFACEFLINGER_PID="$final_surfaceflinger_pid" \
+CRASH_SIGNATURES="$crash_signatures" \
+TARGET_CRASH_SIGNATURES="$target_crash_signatures" \
+VALID_SCREENSHOTS="$valid_screenshots" \
+EFFECTIVE_RENDERER_LINE="$effective_renderer_line" \
+EFFECTIVE_RENDERER_COUNT="$effective_renderer_count" \
+KNOWN_FAILING_TUPLE="$known_failing_tuple" \
+STAGE1_CANDIDATE="$stage1_candidate" \
+KNOWN_CONTROL_CRASH_REPRODUCED="$known_control_crash_reproduced" \
+EXPECTED_CONTROL_FAILURE="$(
+  if [[ "$cell_id" == control-* || "$cell_id" == "swiftshader" ]]; then
+    echo true
+  else
+    echo false
+  fi
+)" \
+CRASH_EVIDENCE_COMPLETE="$crash_evidence_complete" \
+DISPLAY_WIDTH="$display_width" \
+DISPLAY_HEIGHT="$display_height" \
+FAILURE_FILE="$failure_file" \
+python3 - <<'PY' > "$result_json"
+import json
+import os
+from pathlib import Path
+
+
+def boolean(name: str) -> bool:
+    return os.environ[name].lower() == "true"
+
+
+failure_path = Path(os.environ["FAILURE_FILE"])
+failures = [
+    line
+    for line in failure_path.read_text(encoding="utf-8").splitlines()
+    if line
+]
+print(json.dumps({
+    "schema": 1,
+    "purpose": "Android 17 renderer isolation probe; no Orkela APK installed",
+    "cell_id": os.environ["CELL_ID"],
+    "renderer": os.environ["RENDERER"],
+    "probe_scope": os.environ["PROBE_SCOPE"],
+    "effective_renderer_line": os.environ["EFFECTIVE_RENDERER_LINE"],
+    "effective_renderer_count": int(os.environ["EFFECTIVE_RENDERER_COUNT"]),
+    "host_feature": {
+        "profile": os.environ["FEATURE_PROFILE"],
+        "requested_overrides": os.environ["REQUESTED_FEATURE_OVERRIDES"],
+        "requested_vulkan": int(os.environ["REQUESTED_VULKAN"]),
+        "effective_vulkan": int(
+            os.environ["EFFECTIVE_VULKAN"] or -1
+        ),
+        "effective_vulkan_state_count": int(
+            os.environ["EFFECTIVE_VULKAN_COUNT"]
+        ),
+        "requested_vulkan_native_swapchain": int(
+            os.environ["REQUESTED_VULKAN_NATIVE_SWAPCHAIN"]
+        ),
+        "requested_guest_vulkan_only": int(
+            os.environ["REQUESTED_GUEST_VULKAN_ONLY"]
+        ),
+        "effective_vulkan_native_swapchain": int(
+            os.environ["EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN"] or -1
+        ),
+        "effective_state_count": int(
+            os.environ["EFFECTIVE_FEATURE_COUNT"]
+        ),
+        "requested_gl_direct_mem": int(
+            os.environ["REQUESTED_GL_DIRECT_MEM"]
+        ),
+        "effective_gl_direct_mem": int(
+            os.environ["EFFECTIVE_GL_DIRECT_MEM"] or -1
+        ),
+        "effective_gl_direct_mem_state_count": int(
+            os.environ["EFFECTIVE_GL_DIRECT_MEM_COUNT"]
+        ),
+        "requested_has_shared_slots_host_memory_allocator": int(
+            os.environ["REQUESTED_HAS_SHARED_SLOTS"]
+        ),
+        "effective_has_shared_slots_host_memory_allocator": int(
+            os.environ["EFFECTIVE_HAS_SHARED_SLOTS"] or -1
+        ),
+        "effective_has_shared_slots_state_count": int(
+            os.environ["EFFECTIVE_HAS_SHARED_SLOTS_COUNT"]
+        ),
+        "requested_gl_dma": int(os.environ["REQUESTED_GL_DMA"]),
+        "effective_gl_dma": int(os.environ["EFFECTIVE_GL_DMA"] or -1),
+        "effective_gl_dma_state_count": int(
+            os.environ["EFFECTIVE_GL_DMA_COUNT"]
+        ),
+        "effective_gl_dma2": int(os.environ["EFFECTIVE_GL_DMA2"] or -1),
+        "effective_gl_dma2_state_count": int(
+            os.environ["EFFECTIVE_GL_DMA2_COUNT"]
+        ),
+        "host_api_decision_level": int(
+            os.environ["HOST_API_DECISION_LEVEL"] or -1
+        ),
+        "host_api_decision_level_count": int(
+            os.environ["HOST_API_DECISION_LEVEL_COUNT"]
+        ),
+        "read_color_buffer_dma_proxy": (
+            os.environ["EFFECTIVE_GL_DIRECT_MEM"] == "1"
+            and os.environ["EFFECTIVE_HAS_SHARED_SLOTS"] == "1"
+            and os.environ["EFFECTIVE_GL_DMA"] == "1"
+        ),
+        "exact": boolean("FEATURE_EXACT"),
+    },
+    "process": {
+        "started": boolean("PROCESS_STARTED"),
+        "alive_after_probe": boolean("PROCESS_ALIVE_AFTER_PROBE"),
+        "exit_code": (
+            int(os.environ["PROCESS_EXIT_CODE"])
+            if os.environ["PROCESS_EXIT_CODE"]
+            else None
+        ),
+    },
+    "startup": {
+        "failure_class": os.environ["STARTUP_FAILURE_CLASS"],
+        "evidence_count": int(os.environ["STARTUP_EVIDENCE_COUNT"]),
+        "evidence_sha256": os.environ["STARTUP_EVIDENCE_SHA256"],
+        "vulkan_initialization_count": int(
+            os.environ["VULKAN_INITIALIZATION_COUNT"]
+        ),
+        "vulkan_composition_enabled_count": int(
+            os.environ["VULKAN_COMPOSITION_ENABLED_COUNT"]
+        ),
+        "vulkan_composition_state_count": int(
+            os.environ["VULKAN_COMPOSITION_STATE_COUNT"]
+        ),
+        "vulkan_native_swapchain_enabled_count": int(
+            os.environ["VULKAN_NATIVE_SWAPCHAIN_ENABLED_COUNT"]
+        ),
+        "vulkan_native_swapchain_state_count": int(
+            os.environ["VULKAN_NATIVE_SWAPCHAIN_STATE_COUNT"]
+        ),
+        "guest_vulkan_only_enabled_count": int(
+            os.environ["GUEST_VULKAN_ONLY_ENABLED_COUNT"]
+        ),
+        "guest_vulkan_only_state_count": int(
+            os.environ["GUEST_VULKAN_ONLY_STATE_COUNT"]
+        ),
+        "feature_override_request_count": int(
+            os.environ["FEATURE_OVERRIDE_REQUEST_COUNT"]
+        ),
+        "guest_angle_disabled_override_count": int(
+            os.environ["GUEST_ANGLE_DISABLED_OVERRIDE_COUNT"]
+        ),
+        "guest_angle_auto_enabled_count": int(
+            os.environ["GUEST_ANGLE_AUTO_ENABLED_COUNT"]
+        ),
+        "surfaceflinger_angle_vk_instance_created_count": int(
+            os.environ["SURFACEFLINGER_ANGLE_VK_INSTANCE_CREATED_COUNT"]
+        ),
+        "compositor_vk_count": int(os.environ["COMPOSITOR_VK_COUNT"]),
+        "host_compositor_error_count": int(
+            os.environ["HOST_COMPOSITOR_ERROR_COUNT"]
+        ),
+        "guest_evidence": {
+            "captured": boolean("GUEST_EVIDENCE_CAPTURED"),
+            "logcat_sha256": os.environ["GUEST_LOGCAT_SHA256"],
+            "getprop_sha256": os.environ["GUEST_GETPROP_SHA256"],
+            "analysis_sha256": os.environ["GUEST_ANALYSIS_SHA256"],
+            "surfaceflinger_abort_tombstones": int(
+                os.environ["GUEST_SURFACEFLINGER_TOMBSTONES"]
+            ),
+            "coherent_memory_angle_abort_tombstones": int(
+                os.environ[
+                    "GUEST_COHERENT_MEMORY_ANGLE_ABORT_TOMBSTONES"
+                ]
+            ),
+            "updatable_crashing": os.environ[
+                "GUEST_UPDATABLE_CRASHING"
+            ],
+            "updatable_crashing_process_name": os.environ[
+                "GUEST_UPDATABLE_CRASHING_PROCESS_NAME"
+            ],
+            "boot_completed_property": os.environ[
+                "GUEST_BOOT_COMPLETED_PROPERTY"
+            ],
+            "boot_hardware_egl": os.environ[
+                "GUEST_BOOT_HARDWARE_EGL"
+            ],
+            "hardware_egl": os.environ["GUEST_HARDWARE_EGL"],
+        },
+    },
+    "host": {
+        "runner_os": os.environ["RUNNER_OS_VALUE"],
+        "runner_arch": os.environ["RUNNER_ARCH_VALUE"],
+        "runner_name": os.environ["RUNNER_NAME_VALUE"],
+        "image_os": os.environ["IMAGE_OS_VALUE"],
+        "image_version": os.environ["IMAGE_VERSION_VALUE"],
+        "github_run_id": os.environ["GITHUB_RUN_ID_VALUE"],
+        "github_run_attempt": os.environ["GITHUB_RUN_ATTEMPT_VALUE"],
+        "github_sha": os.environ["GITHUB_SHA_VALUE"],
+        "kernel_release": os.environ["HOST_KERNEL_RELEASE"],
+        "machine": os.environ["HOST_MACHINE"],
+        "boot_id": os.environ["HOST_BOOT_ID"],
+        "kvm_access": boolean("KVM_ACCESS"),
+        "evidence_sha256": os.environ["HOST_IDENTITY_SHA256"],
+    },
+    "probe_instance": {
+        "android_user_home": os.environ["ANDROID_USER_HOME_VALUE"],
+        "android_avd_home": os.environ["ANDROID_AVD_HOME_VALUE"],
+        "avd_name": os.environ["AVD_NAME_VALUE"],
+    },
+    "expected_control_failure": boolean("EXPECTED_CONTROL_FAILURE"),
+    "known_control_crash_reproduced": boolean(
+        "KNOWN_CONTROL_CRASH_REPRODUCED"
+    ),
+    "crash_evidence_complete": boolean("CRASH_EVIDENCE_COMPLETE"),
+    "known_failing_tuple": boolean("KNOWN_FAILING_TUPLE"),
+    "stage1_candidate": boolean("STAGE1_CANDIDATE"),
+    "stable": boolean("STABLE"),
+    "boot_completed": boolean("BOOT_COMPLETED"),
+    "adb_reached": boolean("ADB_REACHED"),
+    "environment_exact": boolean("ENVIRONMENT_EXACT"),
+    "emulator": {
+        "expected": os.environ["EXPECTED_EMULATOR_VERSION"],
+        "observed": os.environ["EMULATOR_VERSION"],
+        "revision": os.environ["ARCHIVE_REVISION"],
+        "build_id": int(os.environ["ARCHIVE_BUILD_ID"]),
+        "archive_url": os.environ["ARCHIVE_URL"],
+        "archive_sha1": os.environ["ARCHIVE_SHA1"],
+        "archive_sha256": os.environ["ARCHIVE_SHA256"],
+        "archive_size": int(os.environ["ARCHIVE_SIZE"]),
+        "archive_verified": boolean("ARCHIVE_VERIFIED"),
+    },
+    "guest": {
+        "expected_hash_set": os.environ["EXPECTED_GUEST_HASH_SET"],
+        "hash_set": os.environ["GUEST_HASH_SET"],
+        "expected_fingerprint": os.environ["EXPECTED_FINGERPRINT"],
+        "observed_fingerprint": os.environ["OBSERVED_FINGERPRINT"],
+        "selinux": os.environ["OBSERVED_SELINUX"],
+        "luma_sampling": os.environ["OBSERVED_LUMA"],
+        "page_size": int(os.environ["OBSERVED_PAGE_SIZE"] or 0),
+        "display_width": int(os.environ["DISPLAY_WIDTH"]),
+        "display_height": int(os.environ["DISPLAY_HEIGHT"]),
+    },
+    "soak": {
+        "requested_seconds": int(os.environ["REQUESTED_SOAK_SECONDS"]),
+        "observations": int(os.environ["OBSERVATIONS"]),
+        "healthy_observations": int(os.environ["HEALTHY_OBSERVATIONS"]),
+        "initial_surfaceflinger_pid": os.environ["INITIAL_SURFACEFLINGER_PID"],
+        "final_surfaceflinger_pid": os.environ["FINAL_SURFACEFLINGER_PID"],
+        "pid_changes": int(os.environ["PID_CHANGES"]),
+        "crash_signatures": int(os.environ["CRASH_SIGNATURES"]),
+        "target_crash_signatures": int(
+            os.environ["TARGET_CRASH_SIGNATURES"]
+        ),
+        "valid_screenshots": int(os.environ["VALID_SCREENSHOTS"]),
+    },
+    "failures": failures,
+}, indent=2, sort_keys=True))
+PY
+
+cat "$result_json"
+
+# Probe jobs remain green so one expected renderer failure cannot cancel the
+# other matrix cells. Promotion is a separate evidence decision.
+exit 0

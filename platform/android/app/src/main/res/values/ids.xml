@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Stable automation/accessibility hooks; never encode localized text. -->
+    <item name="play_button" type="id" />
+</resources>

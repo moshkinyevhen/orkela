@@ -10,6 +10,8 @@ media-session behavior, packaging, file association, or visible UI behavior.
 - short speech: the public LibriSpeech `1272-128104-0000` Resonith artifact;
 - long music: the complete 400.773-second Mozart *Die Zauberflöte* overture
   Resonith artifact;
+- composite music: the matching RSC1 `MFT1 + MRI1` Mozart candidate;
+- raw typed MAF: the deterministic periodic MFT1 conformance artifact;
 - malformed and truncated variants derived from the short input.
 
 The report records input filenames, complete sizes, and SHA-256 hashes.
@@ -18,16 +20,67 @@ The report records input filenames, complete sizes, and SHA-256 hashes.
 
 1. Build Windows x64 Release with warnings as errors.
 2. Verify Resonith Core preflight and native decode on short and long inputs.
-3. Confirm that long decode runs off the Windows message thread and that the
-   window remains responsive throughout.
-4. Exercise play, pause, stop, seek, skip, volume, end-of-stream, reopen, and
+3. Run the native Windows audio-device gate. Playback position must advance
+   for compact Truth, raw MFT1, and composite RSC1 without a WAV intermediary.
+4. Record file-open and first-position latency. On the pinned reference system
+   each must remain below two seconds for the complete Mozart anchors.
+5. Exercise play, pause, stop, seek, skip, volume, end-of-stream, reopen, and
    drag-and-drop.
-5. Observe advancing playback position, waveform cursor, and PCM-derived
+6. Observe advancing playback position, waveform cursor, and PCM-derived
    spectrum.
-6. Reject malformed and truncated input before audio-device playback.
-7. Verify `.resonith`, `.scenelith`, and `.orka` current-user associations.
-8. Inspect high-DPI, constrained-work-area, and minimum-window layouts.
-9. Confirm that direct Resonith playback creates no WAV intermediary.
+7. Reject malformed and truncated input before audio-device playback.
+8. Verify the `.resonith` current-user association. Add `.scenelith` and
+   `.orka` associations to this gate only when their native backends can
+   actually open those formats; an installer must not claim unsupported
+   playback.
+9. Inspect high-DPI, constrained-work-area, and minimum-window layouts.
+10. Confirm that direct Resonith playback creates no WAV intermediary.
+11. Build one Android APK with compile/target API 37 and `minSdk` 26, then run
+    that exact APK and its exact instrumentation APK on API 26 and API 37
+    with 4 KiB pages and on API 37 with 16 KiB pages. Every boundary runtime
+    must reproduce the pinned PCM16 SHA-256 and retain no WAV or decoded-PCM
+    filesystem artifact. Renderer selection must be restricted to an exact
+    image fingerprint/build, applied before guest boot, and recorded from the
+    effective Emulator log. It must not modify the Android guest compositor,
+    luma sampling, or SELinux state. Each API 37 gate must additionally hold
+    one SurfaceFlinger PID and healthy Binder/storage state at all 24 bounded
+    observations in a measured 120-second compositor soak, add no
+    mapper/RegionSampling crash signature, and produce four dimensioned,
+    visually non-uniform PNGs whose complete chunk chains and CRCs validate
+    before the application gate begins. For pinned Emulator 37.2.1, the gate
+    must record the host's singular API-level decision and the exact effective
+    `GlDirectMem`, `HasSharedSlotsHostMemoryAllocator`, `GlDma`, `GlDma2`,
+    Vulkan, VNS, and GuestVulkanOnly states. Promotion requires a preceding
+    same-host causal A/B in which disabling both ReadColorBufferDMA
+    prerequisites reproduces the bounded RegionSampling failure and restoring
+    both removes it; this diagnostic result alone is never promotion-eligible.
+12. Build each Windows installer on its native x64 or ARM64 runner. Install
+    silently into an isolated current-user location, parse the installed PE
+    machine field, compare the installed executable hash with the tested build,
+    run the installed bounded full-decode self-test on a real Resonith input,
+    record its PCM fingerprint, verify version/architecture/uninstall/ProgID
+    state, uninstall, and require that the transaction leaves neither files,
+    shortcuts, associations, nor Orkela registry keys.
+13. On Ubuntu and Debian, build and inspect a native `.deb`, install it, launch
+    the installed binary under a virtual display, remove it, and verify the
+    executable is gone. Perform the corresponding native `.pkg` transaction on
+    FreeBSD.
+14. On each macOS architecture, verify the application bundle, ad-hoc sign it
+    for CI execution, build a `productbuild` installer, and inspect the package
+    payload. Developer ID signing and notarization remain mandatory before
+    public promotion.
+15. Validate TUF root/targets signature thresholds, expiry, snapshot binding,
+    persisted rollback/equivocation ledger, transactional state, root
+    rotation, and exact target hashes. Re-run hostile-client cases for signed
+    rollback, expired metadata, mixed metadata generations, missing threshold
+    keys, wrong platform/architecture, development roots, target corruption,
+    and interrupted verification.
+16. Renew online snapshot/timestamp metadata multiple times without changing
+    application targets, then publish the next application sequence and prove
+    that an existing client accepts strictly increasing metadata versions.
+    Reject expired targets, signed-history forks, trust-profile laundering,
+    signer/repository path overlap, and any refresh failure that changes
+    trusted client state.
 
 ## Publication and versioning
 

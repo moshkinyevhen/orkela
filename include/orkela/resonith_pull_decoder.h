@@ -60,7 +60,7 @@ private:
     struct implementation;
 
     explicit resonith_pull_decoder(
-        std::unique_ptr<implementation> implementation
+        std::unique_ptr<implementation> state
     ) noexcept;
 
     std::unique_ptr<implementation> implementation_;

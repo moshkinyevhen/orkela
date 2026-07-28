@@ -73,3 +73,34 @@ Status: **IN IMPLEMENTATION**
 - [x] mandatory Windows, Android, and iOS build matrix;
 - [ ] Linux and macOS desktop adapters;
 - first SceneLith video surface when a conforming Core exists.
+
+## O-4 — Native installation and authenticated updates
+
+Status: **IN IMPLEMENTATION**
+
+- [x] native NSIS install/uninstall transaction on Windows x64;
+- [x] move Windows ARM64 build, tests, install, launch, and uninstall to the
+  native `windows-11-arm` GitHub runner;
+- [x] validate installed PE architecture instead of trusting registry text;
+- [x] replace GUI-liveness probing with a bounded installed full-decode
+  self-test and deterministic PCM fingerprint;
+- [x] implement TUF 1.0 repository generation with 2-of-3 root/targets
+  thresholds, consistent snapshots, expiry, and persisted client state;
+- [x] reject signed rollback, expired/frozen metadata, mix-and-match metadata,
+  insufficient signatures, and corrupt targets in hostile-client tests;
+- [x] make verifier state transactional and preserve it byte-for-byte on any
+  rejected target;
+- [x] enforce contiguous signed release history, root rotation, maximum
+  channel lifetimes, and persisted version/commit/hash anti-equivocation;
+- [x] decouple online snapshot/timestamp renewal from application releases and
+  test renewal → renewal → application-release monotonicity;
+- [x] add cumulative signed release history and reject forks after an accepted
+  release while allowing platform-target migration within one release;
+- [ ] deploy the protected scheduled production metadata signer/publisher;
+- [ ] publish signed MSIX/App Installer packages for Windows;
+- [ ] publish Developer ID signed, notarized Sparkle packages for macOS;
+- [ ] publish signed apt and FreeBSD pkg repositories;
+- [ ] publish release AAB/TestFlight products through store authority;
+- [ ] prove upgrade, interrupted update, downgrade rejection, and retained
+  rollback on each desktop platform;
+- [ ] synchronize every exact tested artifact into the local release archive.

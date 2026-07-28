@@ -1,8 +1,11 @@
 #include "orkela/resonith_pull_decoder.h"
 
+#include "resonith/container.h"
+#include "resonith/lapped.h"
 #include "resonith/lapped_compact.h"
 #include "resonith/maf_typed.h"
 #include "resonith/status.h"
+#include "resonith/stream.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -156,6 +159,8 @@ struct resonith_pull_decoder::implementation {
     enum class backend {
         lapped_compact,
         maf_typed,
+        lapped_pull,
+        maf_truth_composite,
     };
 
     std::vector<std::uint8_t> input;
@@ -164,10 +169,14 @@ struct resonith_pull_decoder::implementation {
     resonith_lapped_compact_requirements requirements{};
     resonith_maf_typed_session maf_session{};
     resonith_maf_typed_requirements maf_requirements{};
+    resonith_lapped_pull_session raw_session{};
+    resonith_lapped_pull_requirements raw_requirements{};
     resonith_stream_info stream_info{};
     std::unique_ptr<field_storage> current;
     std::unique_ptr<field_storage> lookahead;
+    std::unique_ptr<field_storage> raw_memory;
     std::unique_ptr<maf_storage> maf_memory;
+    std::vector<std::int16_t> composite_prediction;
     std::uint32_t expected_start = 0U;
 
     explicit implementation(std::vector<std::uint8_t> bytes)
@@ -187,6 +196,16 @@ struct resonith_pull_decoder::implementation {
             && input[3] == static_cast<std::uint8_t>('1')
         ) {
             open_maf();
+            return;
+        }
+        if (
+            input.size() >= 4U
+            && input[0] == static_cast<std::uint8_t>('R')
+            && input[1] == static_cast<std::uint8_t>('S')
+            && input[2] == static_cast<std::uint8_t>('C')
+            && input[3] == static_cast<std::uint8_t>('1')
+        ) {
+            open_rsc1();
             return;
         }
         open_lapped();
@@ -244,11 +263,10 @@ struct resonith_pull_decoder::implementation {
         };
     }
 
-    void open_maf() {
-        active_backend = backend::maf_typed;
+    void initialize_maf(const std::uint8_t* data, std::size_t data_size) {
         resonith_status status = resonith_maf_typed_inspect(
-            input.data(),
-            input.size(),
+            data,
+            data_size,
             &maf_requirements
         );
         if (status != RESONITH_STATUS_OK) {
@@ -265,14 +283,19 @@ struct resonith_pull_decoder::implementation {
         resonith_maf_typed_workspace workspace =
             maf_memory->view(maf_requirements);
         status = resonith_maf_typed_open(
-            input.data(),
-            input.size(),
+            data,
+            data_size,
             &workspace,
             &maf_session
         );
         if (status != RESONITH_STATUS_OK) {
             throw decoder_error(status_message("Resonith MFT1 open", status));
         }
+    }
+
+    void open_maf() {
+        active_backend = backend::maf_typed;
+        initialize_maf(input.data(), input.size());
         stream_info = {
             maf_requirements.sample_rate,
             maf_requirements.total_frames,
@@ -281,12 +304,196 @@ struct resonith_pull_decoder::implementation {
                 * maf_requirements.output_channels,
         };
     }
+
+    void initialize_raw_lapped(
+        const std::uint8_t* data,
+        std::size_t data_size
+    ) {
+        resonith_status status = resonith_lapped_pull_inspect(
+            data,
+            data_size,
+            &raw_requirements
+        );
+        if (status != RESONITH_STATUS_OK) {
+            throw decoder_error(
+                status_message("Resonith LPF1 pull preflight", status)
+            );
+        }
+        validate_output_bounds(
+            raw_requirements.field.sample_rate,
+            raw_requirements.field.frame_count,
+            raw_requirements.field.output_channels
+        );
+        raw_memory = std::make_unique<field_storage>(
+            raw_requirements.field,
+            true
+        );
+        resonith_lapped_workspace workspace =
+            raw_memory->view(raw_requirements.field);
+        status = resonith_lapped_pull_open(
+            data,
+            data_size,
+            &workspace,
+            &raw_session,
+            &raw_requirements
+        );
+        if (status != RESONITH_STATUS_OK) {
+            throw decoder_error(
+                status_message("Resonith LPF1 pull open", status)
+            );
+        }
+    }
+
+    void open_raw_lapped() {
+        active_backend = backend::lapped_pull;
+        initialize_raw_lapped(input.data(), input.size());
+        stream_info = {
+            raw_requirements.field.sample_rate,
+            raw_requirements.field.frame_count,
+            raw_requirements.field.output_channels,
+            raw_requirements.maximum_output_elements,
+        };
+    }
+
+    static bool section_type_is(
+        const resonith_container_section& section,
+        const char (&expected)[5]
+    ) noexcept {
+        return std::equal(
+            section.type,
+            section.type + 4U,
+            reinterpret_cast<const std::uint8_t*>(expected)
+        );
+    }
+
+    void open_rsc1() {
+        resonith_container_view container{};
+        resonith_status status = resonith_container_open(
+            input.data(),
+            input.size(),
+            &container
+        );
+        if (status != RESONITH_STATUS_OK) {
+            throw decoder_error(
+                status_message("Resonith RSC1 preflight", status)
+            );
+        }
+        if (container.profile == 0U && container.level == 5U) {
+            open_raw_lapped();
+            return;
+        }
+        if (
+            container.profile != 0U
+            || container.level != 6U
+            || container.section_count != 3U
+        ) {
+            throw decoder_error(
+                "Resonith RSC1 profile is not supported by this player"
+            );
+        }
+
+        resonith_container_section config_section{};
+        resonith_container_section maf_section{};
+        resonith_container_section residual_section{};
+        bool found_config = false;
+        bool found_maf = false;
+        bool found_residual = false;
+        for (
+            std::uint32_t index = 0U;
+            index < container.section_count;
+            ++index
+        ) {
+            resonith_container_section section{};
+            status = resonith_container_get_section(
+                &container,
+                index,
+                &section
+            );
+            if (status != RESONITH_STATUS_OK) {
+                throw decoder_error(
+                    status_message("Resonith RSC1 directory", status)
+                );
+            }
+            status = resonith_container_verify_section(&section);
+            if (status != RESONITH_STATUS_OK) {
+                throw decoder_error(
+                    status_message("Resonith RSC1 section", status)
+                );
+            }
+            if (section_type_is(section, "CONF")) {
+                config_section = section;
+                found_config = true;
+            } else if (section_type_is(section, "MFT1")) {
+                maf_section = section;
+                found_maf = true;
+            } else if (section_type_is(section, "MRI1")) {
+                residual_section = section;
+                found_residual = true;
+            } else {
+                throw decoder_error(
+                    "Resonith MAF Truth container has an unknown section"
+                );
+            }
+        }
+        if (!found_config || !found_maf || !found_residual) {
+            throw decoder_error(
+                "Resonith MAF Truth container is incomplete"
+            );
+        }
+
+        resonith_stream_config config{};
+        status = resonith_stream_config_parse(
+            config_section.payload,
+            config_section.payload_size,
+            &config
+        );
+        if (status != RESONITH_STATUS_OK) {
+            throw decoder_error(
+                status_message("Resonith MAF Truth config", status)
+            );
+        }
+        initialize_maf(maf_section.payload, maf_section.payload_size);
+        initialize_raw_lapped(
+            residual_section.payload,
+            residual_section.payload_size
+        );
+        if (
+            container.timebase_hz != maf_requirements.sample_rate
+            || container.timebase_hz
+                != raw_requirements.field.sample_rate
+            || config.sample_count != maf_requirements.total_frames
+            || config.sample_count != raw_requirements.field.frame_count
+            || config.output_channels != maf_requirements.output_channels
+            || config.output_channels
+                != raw_requirements.field.output_channels
+        ) {
+            throw decoder_error(
+                "Resonith MAF Truth child timelines do not match"
+            );
+        }
+
+        active_backend = backend::maf_truth_composite;
+        const std::uint32_t packet_frames = std::min(
+            maf_requirements.render_quantum,
+            raw_requirements.render_quantum
+        );
+        const std::size_t packet_elements =
+            static_cast<std::size_t>(packet_frames)
+            * config.output_channels;
+        composite_prediction.resize(packet_elements);
+        stream_info = {
+            container.timebase_hz,
+            config.sample_count,
+            config.output_channels,
+            packet_elements,
+        };
+    }
 };
 
 resonith_pull_decoder::resonith_pull_decoder(
-    std::unique_ptr<implementation> implementation
+    std::unique_ptr<implementation> state
 ) noexcept
-    : implementation_(std::move(implementation)) {}
+    : implementation_(std::move(state)) {}
 
 resonith_pull_decoder::resonith_pull_decoder(
     resonith_pull_decoder&&
@@ -336,6 +543,89 @@ pull_result resonith_pull_decoder::read_next(
     auto& state = *implementation_;
     if (
         state.active_backend
+        == implementation::backend::maf_truth_composite
+    ) {
+        if (state.expected_start == state.stream_info.frame_count) {
+            if (error != nullptr) {
+                error->clear();
+            }
+            return pull_result::end;
+        }
+        if (destination.size() < state.stream_info.maximum_packet_elements) {
+            fail("pull destination is smaller than the preflight bound", error);
+            return pull_result::error;
+        }
+        const std::uint32_t packet_frames = static_cast<std::uint32_t>(
+            state.stream_info.maximum_packet_elements
+                / state.stream_info.channels
+        );
+        const std::uint32_t requested = std::min(
+            packet_frames,
+            state.stream_info.frame_count - state.expected_start
+        );
+
+        std::uint32_t prediction_written = 0U;
+        resonith_status status = resonith_maf_typed_render(
+            &state.maf_session,
+            requested,
+            state.composite_prediction.data(),
+            state.composite_prediction.size(),
+            &prediction_written
+        );
+        if (
+            status != RESONITH_STATUS_OK
+            || prediction_written != requested
+        ) {
+            fail(status_message("Resonith composite MFT1 render", status), error);
+            return pull_result::error;
+        }
+
+        resonith_lapped_workspace raw_workspace =
+            state.raw_memory->view(state.raw_requirements.field);
+        std::uint32_t residual_start = 0U;
+        std::size_t residual_written = 0U;
+        status = resonith_lapped_pull_decode_next(
+            &state.raw_session,
+            &raw_workspace,
+            requested,
+            destination.data(),
+            destination.size(),
+            &residual_start,
+            &residual_written
+        );
+        if (
+            status != RESONITH_STATUS_OK
+            || residual_start != state.expected_start
+            || residual_written != requested
+        ) {
+            fail(
+                status_message("Resonith composite MRI1 render", status),
+                error
+            );
+            return pull_result::error;
+        }
+
+        const std::size_t element_count =
+            static_cast<std::size_t>(requested)
+            * state.stream_info.channels;
+        for (std::size_t index = 0U; index < element_count; ++index) {
+            const std::int32_t mixed =
+                static_cast<std::int32_t>(destination[index])
+                + state.composite_prediction[index];
+            destination[index] = static_cast<std::int16_t>(
+                std::clamp<std::int32_t>(mixed, -32768, 32767)
+            );
+        }
+        *logical_start = state.expected_start;
+        *frames_written = requested;
+        state.expected_start += requested;
+        if (error != nullptr) {
+            error->clear();
+        }
+        return pull_result::data;
+    }
+    if (
+        state.active_backend
         == implementation::backend::maf_typed
     ) {
         if (state.expected_start == state.maf_requirements.total_frames) {
@@ -372,6 +662,52 @@ pull_result resonith_pull_decoder::read_next(
         }
         *frames_written = written;
         state.expected_start += written;
+        if (error != nullptr) {
+            error->clear();
+        }
+        return pull_result::data;
+    }
+    if (
+        state.active_backend
+        == implementation::backend::lapped_pull
+    ) {
+        if (state.expected_start == state.raw_requirements.field.frame_count) {
+            if (error != nullptr) {
+                error->clear();
+            }
+            return pull_result::end;
+        }
+        if (destination.size() < state.stream_info.maximum_packet_elements) {
+            fail("pull destination is smaller than the preflight bound", error);
+            return pull_result::error;
+        }
+        resonith_lapped_workspace workspace =
+            state.raw_memory->view(state.raw_requirements.field);
+        const std::uint32_t requested = std::min(
+            state.raw_requirements.render_quantum,
+            state.raw_requirements.field.frame_count - state.expected_start
+        );
+        const resonith_status status = resonith_lapped_pull_decode_next(
+            &state.raw_session,
+            &workspace,
+            requested,
+            destination.data(),
+            destination.size(),
+            logical_start,
+            frames_written
+        );
+        if (status != RESONITH_STATUS_OK) {
+            fail(status_message("Resonith LPF1 pull render", status), error);
+            return pull_result::error;
+        }
+        if (
+            *logical_start != state.expected_start
+            || *frames_written != requested
+        ) {
+            fail("Resonith LPF1 produced a discontinuous timeline", error);
+            return pull_result::error;
+        }
+        state.expected_start += requested;
         if (error != nullptr) {
             error->clear();
         }

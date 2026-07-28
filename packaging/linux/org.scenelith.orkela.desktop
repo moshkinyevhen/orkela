@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Orkela
+Comment=Play bounded Resonith audio
+Exec=orkela %f
+Icon=orkela
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/x-resonith;
+StartupNotify=true
+StartupWMClass=org.scenelith.orkela

@@ -1,3 +1,4 @@
+#include "orkela/localization.h"
 #include "orkela/resonith_pull_decoder.h"
 
 #include <jni.h>
@@ -290,4 +291,43 @@ Java_org_scenelith_orkela_MainActivity_nativeClose(
     jlong handle
 ) {
     delete from_handle(handle);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_scenelith_orkela_MainActivity_nativeText(
+    JNIEnv* environment,
+    jclass,
+    jstring locale_tag,
+    jint text_identifier
+) {
+    if (
+        locale_tag == nullptr
+        || text_identifier < 0
+        || text_identifier
+            >= static_cast<jint>(orkela::text_id::count)
+    ) {
+        throw_java(
+            environment,
+            "java/lang/IllegalArgumentException",
+            "Invalid localization request"
+        );
+        return nullptr;
+    }
+    const char* locale = environment->GetStringUTFChars(
+        locale_tag,
+        nullptr
+    );
+    if (locale == nullptr) {
+        return nullptr;
+    }
+    const orkela::language selected =
+        orkela::language_from_tag(locale);
+    environment->ReleaseStringUTFChars(locale_tag, locale);
+    const std::string_view translated = orkela::localized_text(
+        selected,
+        static_cast<orkela::text_id>(text_identifier)
+    );
+    return environment->NewStringUTF(
+        std::string(translated).c_str()
+    );
 }

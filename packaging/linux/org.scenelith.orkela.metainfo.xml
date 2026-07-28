@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.scenelith.orkela</id>
+  <name>Orkela</name>
+  <summary>Truth-aware native player for Resonith audio</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <description>
+    <p>
+      Orkela plays bounded Resonith streams directly through the portable
+      C++23 decoder and presents live waveform, spectrum, causal-field, and
+      multiresolution-history views.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.scenelith.orkela.desktop</launchable>
+  <provides>
+    <mediatype>audio/x-resonith</mediatype>
+  </provides>
+  <url type="homepage">https://github.com/moshkinyevhen/orkela</url>
+  <releases>
+    <release version="0.3.0-alpha.6" date="2026-07-28">
+      <description>
+        <p>Cross-platform native alpha with four analytical views.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -5,11 +5,19 @@ release links to reproducible QA evidence and identifies the exact executable.
 
 ## [Unreleased]
 
-Candidate version: **0.3.0-alpha.3**. Publication remains blocked until the
+Candidate version: **0.3.0-alpha.6**. Publication remains blocked until the
 complete platform and O-2 release-evidence gates pass.
+
+Local public-pin evidence:
+[`Alpha.6 Local Release Gate`](docs/results/ALPHA6_LOCAL_RELEASE_GATE_2026-07-28.md).
 
 ### Added
 
+- Fail-closed Android 17 `ReadColorBufferDMA` causal gate. It records the
+  Emulator host's incorrect API-3 decision for the official `android-37.0`
+  image, requires effective `GlDirectMem=1`, shared host slots and `GlDma=1`,
+  disables the contradictory Vulkan/VNS/GuestAngle route, and rejects missing,
+  duplicate, delayed-crash, or dependency-conflict evidence.
 - Strict C++23 `Orkela::Session` with bounded Resonith preflight and an
   allocation-free successful packet-pull path.
 - Native Android application project for ARM64 and x86-64 with direct
@@ -18,9 +26,13 @@ complete platform and O-2 release-evidence gates pass.
   Resonith decode and `AVAudioEngine` output.
 - Mandatory same-revision Windows, Android, iOS device, and iOS simulator
   build contract.
-- Pinned Gradle 9.4.1 wrapper, Android Gradle Plugin 9.2.1, SDK 36, NDK r29,
+- Pinned Gradle 9.4.1 wrapper, Android Gradle Plugin 9.2.1, Android 17
+  compile/target SDK 37, Android 8 minimum SDK 26, NDK r29,
   and macOS/Xcode CI gates.
-- Resonith Core revision `9f7650bf0bf06a35388119614745c6db1dbef709`,
+- Boundary-runtime Android gate that installs the same exact APK on API 26 and
+  API 37 with 4 KiB pages and on API 37 with 16 KiB pages, requiring identical
+  native Resonith PCM fingerprints.
+- Resonith Core revision `c6640fcd84f5be81863da6f0b8e5c3cf8ea65abd`,
   including the bounded integer MAF DSP substrate and its cross-platform
   conformance fixes.
 - A portable pull-session executable gate that decodes complete streams,
@@ -29,6 +41,79 @@ complete platform and O-2 release-evidence gates pass.
 - Direct bounded `MFT1` pull playback through Resonith Core, including
   forward/reverse immutable Basis instances, circular alignment, callback
   partitioning, and preflight rejection of a truncated stream.
+- Direct composite `RSC1` MAF Truth playback with matched `MFT1` prediction,
+  `MRI1` lapped innovation, and saturating PCM reconstruction.
+- A real Windows audio-device release gate that requires playback position to
+  advance for compact Truth, raw MFT1, and composite RSC1 files.
+- Premium Android Now Playing surface with an edge-to-edge aurora backdrop,
+  custom vector transport controls, responsive cards, native haptics, and an
+  adaptive launcher icon.
+- Four live PCM analytical views: causal field, normalized spectrum, waveform,
+  and an accumulating multiresolution spectral history.
+- Native Android timeline seeking, ten-second transport, repeat, volume, and
+  pitch-preserving playback-speed controls.
+- Incoming Android `VIEW` handling for direct system launch of external
+  `.resonith` content streams.
+- Shared allocation-bounded C++23 PCM visual-analysis core for Field,
+  Spectrum, Wave, and multiresolution History presentation on every platform.
+- Shared interface localization contract for English, German, Spanish,
+  Italian, Japanese, Korean, Simplified Chinese, Russian, and Ukrainian,
+  including BCP-47 system-language routing and English fallback.
+- Android Interface settings surface with automatic system-language selection
+  and a persistent manual language override.
+- Windows x64/ARM64 Field, Spectrum, Wave, and compacting History views using
+  the shared analyzer, including click/`V` switching and persisted mode.
+- Windows automatic UI-language selection and a manual
+  Settings → Interface → Language override backed by the shared catalog.
+- Native macOS AppKit shell for ARM64/x86-64 with direct `AVAudioEngine`
+  playback, all four visual modes, and the same Settings language contract.
+- Native GTK4/GStreamer shell for Ubuntu, Debian, and FreeBSD with direct PCM
+  playback, all four visual modes, and the same Settings language contract.
+- Cross-platform GitHub build matrix for Windows x64/ARM64, macOS
+  ARM64/x86-64, Ubuntu, Debian, and FreeBSD.
+- Deterministic multi-platform update-manifest generator and a signed
+  packaging contract that distinguishes installers, store packages, portable
+  archives, and authenticated automatic updates.
+- Reproducible per-user Windows x64 and ARM64 NSIS installers with Start-menu
+  entries, uninstall metadata, the native payload architecture recorded in
+  the registry, and honest `.resonith` Open With registration.
+- A pinned NSIS 3.12 bootstrap whose downloaded binary must match the accepted
+  SHA-256 before execution, plus a transactional install/uninstall gate.
+- Linux desktop integration metadata, direct file-activation handling, and
+  CPack definitions for installable Debian/Ubuntu `.deb` and FreeBSD `.pkg`
+  artifacts.
+- A macOS `productbuild` package lane alongside the application archive; the
+  alpha package remains ad-hoc until Developer ID signing and notarization are
+  configured.
+- A cross-platform packaging-contract test that prevents Windows, Android,
+  Apple, and Linux release versions or supported file-type claims from
+  silently drifting apart.
+- A fail-closed manual prerelease assembler that accepts an immutable version
+  tag only after successful Windows, desktop Unix/Apple, and mobile workflows
+  exist for the exact source commit. The old x64-only tag publisher was
+  removed.
+- TUF 1.0 authenticated-update repository tooling based on Python-TUF 7.0.0,
+  with 2-of-3 root and targets signatures, short-lived timestamp/snapshot
+  roles, consistent snapshots, and hash-locked release dependencies.
+- Hostile-client update gates covering signed rollback, expired/frozen
+  metadata, mix-and-match metadata, insufficient signing keys, non-HTTPS
+  inventory URLs, abbreviated source identities, and corrupt target bytes.
+- Native Windows ARM64 CI on `windows-11-arm`, including C++ tests, playback,
+  PE machine validation, installed application launch, and isolated
+  install/uninstall instead of x64 cross-build-only evidence.
+- Installed Windows `--self-test` mode with bounded completion, complete
+  Resonith decoding, deterministic PCM fingerprint evidence, tested-build
+  hash equality, and fail-closed uninstall residue checks.
+- Transactional TUF client-state verification under an OS advisory lock:
+  rejected channel, architecture, version, metadata, or target candidates
+  cannot mutate the previously trusted state.
+- Signed contiguous release history, persisted anti-equivocation ledger,
+  dual-threshold root-rotation tests, channel-bounded metadata lifetimes, and
+  explicit production rejection of development test roots.
+- Independent online snapshot/timestamp renewal with versions decoupled from
+  application releases, cumulative signed skip/fork history, crash-journal
+  recovery, selector-aware artifact identities, and fail-closed refresh around
+  expired targets or repositories overlapping private signer custody.
 
 ### Changed
 
@@ -40,6 +125,108 @@ complete platform and O-2 release-evidence gates pass.
   network or credential dependency.
 - Published reproducible `0.3.0-alpha.2` Core/build/mobile evidence and
   complete speech, piano, and 400.773-second Mozart pull-session results.
+- Windows playback now pulls into four reusable 4096-frame `waveOut` buffers;
+  file open decodes only one bounded visualization preview instead of the
+  complete track.
+- On the reference Windows system, full Mozart load/start fell from about
+  32.5 seconds to 0.049/0.173 seconds for compact Truth and 0.571/0.625 seconds
+  for composite RSC1.
+- Android live spectral analysis now uses a bounded Goertzel bank and cached
+  Hann window instead of per-sample trigonometric evaluation.
+- The mobile timeline and analytical views consume the same native PCM packets
+  queued to the audio device; they do not predecode a WAV or maintain a second
+  media representation.
+- Windows executable and installer version resources now agree with
+  `VERSION` at `0.3.0-alpha.6`.
+- The release assembler now requires an existing exact `refs/tags/...` tag
+  whose peeled commit equals the checked-out source; a matching branch or
+  version string cannot create release authority.
+
+### Fixed
+
+- Android 17 renderer diagnosis is now fail-closed and evidence-gated. The
+  isolated GitHub matrix proved that Emulator `36.6.11.0` crashes the pinned
+  Android 17 compositor with SwiftShader, swangle/SwiftShader, and
+  swangle/lavapipe; the host backend never reached ADB. The gate preserves the
+  stock guest and requires a 120-second compositor soak, one SurfaceFlinger
+  lifetime, 24 healthy service/storage observations, zero matching crash
+  signatures, and four decoded, CRC-valid non-uniform screenshots before any
+  backend can become a candidate. A second exact seven-cell GitHub gate
+  reproduced the failure on the 36.6.11 control and rejected every
+  SwiftShader, swangle/SwiftShader, and swangle/lavapipe cell on official
+  Emulator 37.1.10 and 37.2.1 archives. Release promotion remains blocked; the
+  reducer emitted no stage-one candidate or promotion identity.
+- The next Android 17 causal probe now compares Emulator 37.2.1 with
+  `VulkanNativeSwapchain` off and on in one run. It independently validates
+  the effective host-feature state, allowlisted renderer tuple, target crash
+  evidence, GitHub runner image/run/kernel identity, and the unchanged guest
+  contract before any result can enter the cold-boot APK gate.
+- The completed Vulkan-composition run reproduced the feature-off control and
+  proved that all three feature-on renderer cells reached effective state
+  `VulkanNativeSwapchain=1`, but each failed host framebuffer/compositor
+  initialization before ADB. No cell was promoted.
+- Provenance-valid pre-boot renderer failures now produce a consolidated
+  `REJECTED` assessment with process state and hash-verified normalized startup
+  evidence; they can never produce or retain a promotion identity. A bounded
+  follow-up diagnostic explicitly enables both `Vulkan` and
+  `VulkanNativeSwapchain` and requires VkEmulation, Vulkan composition,
+  `CompositorVk`, and ADB evidence before the Linux route may continue.
+- The exact explicit-backend run proved that Emulator 37.2.1 initializes
+  SwiftShader VkEmulation and `CompositorVk` and reaches ADB, then fails guest
+  boot with 58 SurfaceFlinger fatal signals. A bounded same-PID/TID parser
+  links 51 complete tombstones through ANGLE and
+  `vulkan.ranchu::createCoherentMemory`, rejecting seven incomplete episodes.
+  Probe evidence now separates
+  `adb_reached` from `boot_completed`, records the boot deadline, SHA-256 links
+  raw logcat/getprop, parses the exact same immutable bytes it hashes, and
+  independently recomputes complete tombstones.
+- The causal Android 17 gate now runs the failing explicit-backend baseline
+  followed by
+  `Vulkan,VulkanNativeSwapchain,-GuestAngle`. The candidate must prove
+  `GuestVulkanOnly=0` while preserving VkEmulation, Vulkan composition,
+  `CompositorVk`, and full guest boot; mixed or silently overridden feature
+  state fails closed. Both probes execute sequentially on one GitHub runner
+  and kernel boot ID with isolated AVD homes; one joint SHA-linked assessment
+  rejects any host drift or additional configured coordinate. Boot completion
+  is insufficient when raw evidence still contains a SurfaceFlinger abort,
+  target ANGLE/coherent-memory episode, MESA virtual-memory fatal, or final
+  updatable-crashing state.
+- Same-host GitHub run
+  [`30374223297`](https://github.com/moshkinyevhen/orkela/actions/runs/30374223297)
+  proved that explicit `-GuestAngle` preserves Vulkan, the native swapchain,
+  VkEmulation, and `CompositorVk`, changes effective `GuestVulkanOnly` from
+  one to zero, and cleanly boots the pinned Android 17 guest. The baseline
+  produced 58 SurfaceFlinger fatal signals and 40 complete target tombstones;
+  the candidate produced zero SurfaceFlinger, ANGLE, or MESA fatal evidence,
+  `sys.boot_completed=1`, and `ro.hardware.egl=emulation`. This is a bounded
+  backend/startup result, not yet an APK or release promotion.
+- Same-host causal run
+  [`30399094666`](https://github.com/moshkinyevhen/orkela/actions/runs/30399094666)
+  isolated the corrected Android 17 ReadColorBufferDMA capability bridge. With
+  `GlDirectMem` and shared host slots disabled, the guest produced 25 target
+  RegionSampling crash signatures and 22 SurfaceFlinger PID changes. Enabling
+  exactly those two prerequisites retained `GlDma=1`, produced zero crashes
+  and zero PID changes, passed 24/24 soak observations, and yielded four valid
+  screenshots. The result remains diagnostic-only until the complete
+  cold-boot and exact-APK promotion gate passes.
+- Android promotion evidence now stops and reaps the Emulator before hashing
+  its raw log, so normal shutdown lines cannot mutate an already sealed
+  manifest. The reducer validates the real partial order of graphics startup
+  phases while treating the diagnostic field-dump order as semantically
+  unordered. Reprocessing the completed 3x4-KiB and 3x16-KiB evidence from run
+  `30399084868` then produced `ANDROID17_COLD_PROMOTION_PASSED`.
+- Android 17 16-KiB page-size validation now uses the kernel-facing
+  `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
+  because compatibility mappings can report 4 KiB on a 16-KiB kernel.
+- Composite Resonith files no longer fail with `Resonith preflight: bad magic`.
+- Long recordings no longer require a complete PCM allocation before the Play
+  command becomes available.
+- Android external streams no longer depend on the bundled demonstration path.
+- Quiet passages no longer collapse the primary analyzer into a flat line;
+  adaptive dB shaping preserves their real spectral contour while the timeline
+  retains absolute event strength.
+- Android transport and timeline controls now expose localized TalkBack
+  labels in all nine supported interface languages.
 
 ### Planned
 
@@ -47,8 +234,8 @@ complete platform and O-2 release-evidence gates pass.
   search, keyboard-only navigation, full category coverage, premium motion and
   focus states, persisted working controls, and explicit status labels for
   capabilities that do not yet have a backend.
-- Bounded producer/ring-buffer playback on every platform, playlists, and
-  library adapters.
+- Complete the same composite transport and measured startup gate on Android
+  and iOS; add playlists and library adapters.
 
 ## [0.2.0-alpha.2] - 2026-07-26
 

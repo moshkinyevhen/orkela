@@ -1,115 +1,1550 @@
-name: Mobile
+name: Mobile Applications
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      renderer_probe:
+        description: Run only the isolated Android 17 renderer matrix
+        required: false
+        default: false
+        type: boolean
+      emulator_probe:
+        description: Run only the version-scoped Android 17 Emulator matrix
+        required: false
+        default: false
+        type: boolean
+      vulkan_swapchain_probe:
+        description: Run only the Android 17 Vulkan composition A/B matrix
+        required: false
+        default: false
+        type: boolean
+      vulkan_backend_probe:
+        description: Run only the Android 17 ReadColorBufferDMA causal A/B
+        required: false
+        default: false
+        type: boolean
 
 permissions:
+  actions: read
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: 29.0.14206865
+  EXPECTED_STREAM_SHA256: fbd985cce4091d92c911e93a617faddf0b94370d6677640aa0dc94a12623a05a
+  EXPECTED_PCM_SHA256: 3cfcae4996a08976f42ec83744ea0130935ca53d83b37129c001581697618618
+  PINNED_RESONITH_COMMIT: c6640fcd84f5be81863da6f0b8e5c3cf8ea65abd
 
 jobs:
   android:
-    name: Android APK
+    name: Android API-26/API-37 application
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || (
+        inputs.renderer_probe != true
+        && inputs.emulator_probe != true
+        && inputs.vulkan_swapchain_probe != true
+        && inputs.vulkan_backend_probe != true
+      )
     runs-on: ubuntu-24.04
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v5
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+          cache-dependency-path: |
+            platform/android/gradle/wrapper/gradle-wrapper.properties
+            platform/android/**/*.gradle.kts
+
+      - name: Select Android NDK and SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          if [[ ! -d "$ndk" ]]; then
+            timeout --signal=TERM --kill-after=15s 1800s \
+              "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+              "ndk;$ANDROID_NDK_VERSION"
+          fi
+          timeout --signal=TERM --kill-after=15s 1800s \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0"
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          java -version
+          "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" --version
+
+      - name: Build exact application and instrumentation APKs
+        working-directory: platform/android
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 1800s \
+            ./gradlew \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
+            --no-daemon \
+            --stacktrace
+
+      - name: Verify APK signing, ABIs, native code, and bundled stream
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="platform/android/app/build/outputs/apk/debug/app-debug.apk"
+          test_apk="platform/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          evidence="build/mobile-evidence/android/diagnostics"
+          mkdir -p "$evidence/elf" "$evidence/logs"
+          test -s "$app"
+          test -s "$test_apk"
+          unzip -t "$app"
+          unzip -t "$test_apk"
+
+          apksigner="$(
+            find "$ANDROID_HOME/build-tools" -type f -name apksigner \
+              -print \
+              | sort -V \
+              | tail -n 1
+          )"
+          test -x "$apksigner"
+          "$apksigner" verify --verbose --print-certs "$app" \
+            | tee "$evidence/APK-SIGNATURE.txt"
+          "$apksigner" verify --verbose --print-certs "$test_apk" \
+            | tee "$evidence/TEST-APK-SIGNATURE.txt"
+          certificate_digest() {
+            grep -E "certificate SHA-256 digest:" "$1" \
+              | sed -E \
+                  's/^.*certificate SHA-256 digest:[[:space:]]*//' \
+              | tr 'A-F' 'a-f' \
+              | LC_ALL=C sort -u
+          }
+          app_cert_sha256="$(
+            certificate_digest "$evidence/APK-SIGNATURE.txt"
+          )"
+          test_apk_cert_sha256="$(
+            certificate_digest "$evidence/TEST-APK-SIGNATURE.txt"
+          )"
+          test "$(printf '%s\n' "$app_cert_sha256" | wc -l)" -eq 1
+          test "$(printf '%s\n' "$test_apk_cert_sha256" | wc -l)" -eq 1
+          [[ "$app_cert_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$test_apk_cert_sha256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "ORKELA_APP_CERT_SHA256=$app_cert_sha256"
+            echo "ORKELA_TEST_APK_CERT_SHA256=$test_apk_cert_sha256"
+          } >> "$GITHUB_ENV"
+
+          aapt="$ANDROID_HOME/build-tools/37.0.0/aapt"
+          zipalign="$ANDROID_HOME/build-tools/37.0.0/zipalign"
+          test -x "$aapt"
+          test -x "$zipalign"
+          "$aapt" dump badging "$app" > "$evidence/APK-BADGING.txt"
+          grep -Fq \
+            "package: name='org.scenelith.orkela' versionCode='30006' versionName='0.3.0-alpha.6'" \
+            "$evidence/APK-BADGING.txt"
+          grep -Fq "compileSdkVersion='37'" "$evidence/APK-BADGING.txt"
+          grep -Fq "sdkVersion:'26'" "$evidence/APK-BADGING.txt"
+          grep -Fq "targetSdkVersion:'37'" "$evidence/APK-BADGING.txt"
+          "$zipalign" -c -P 16 -v 4 "$app" \
+            > "$evidence/APK-16K-ZIPALIGN.txt"
+
+          unzip -Z1 "$app" \
+            | awk -F/ '$1 == "lib" {print $2}' \
+            | sort -u \
+            > "$evidence/APK-ABIS.txt"
+          printf '%s\n' arm64-v8a x86_64 \
+            > "$evidence/EXPECTED-APK-ABIS.txt"
+          diff -u "$evidence/EXPECTED-APK-ABIS.txt" "$evidence/APK-ABIS.txt"
+          unzip -Z1 "$app" \
+            | grep '^lib/' \
+            | sort \
+            > "$evidence/APK-NATIVE-MEMBERS.txt"
+          printf '%s\n' \
+            lib/arm64-v8a/liborkela_android.so \
+            lib/x86_64/liborkela_android.so \
+            > "$evidence/EXPECTED-APK-NATIVE-MEMBERS.txt"
+          diff -u \
+            "$evidence/EXPECTED-APK-NATIVE-MEMBERS.txt" \
+            "$evidence/APK-NATIVE-MEMBERS.txt"
+
+          ndk_bin="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          declare -A machines=(
+            [arm64-v8a]="AArch64"
+            [x86_64]="Advanced Micro Devices X86-64"
+          )
+          for abi in arm64-v8a x86_64; do
+            member="lib/$abi/liborkela_android.so"
+            unzip -l "$app" "$member" \
+              | grep -F "$member" > /dev/null
+            unzip -p "$app" "$member" > "$evidence/elf/liborkela_android-$abi.so"
+            "$ndk_bin/llvm-readelf" -h \
+              "$evidence/elf/liborkela_android-$abi.so" \
+              > "$evidence/elf/ELF-HEADER-$abi.txt"
+            grep -F "Machine:" "$evidence/elf/ELF-HEADER-$abi.txt" \
+              | grep -F "${machines[$abi]}" > /dev/null
+            "$ndk_bin/llvm-readelf" -l \
+              "$evidence/elf/liborkela_android-$abi.so" \
+              > "$evidence/elf/PROGRAM-HEADERS-$abi.txt"
+            awk '
+              $1 == "LOAD" && $NF != "0x4000" { bad = 1 }
+              END { exit bad }
+            ' "$evidence/elf/PROGRAM-HEADERS-$abi.txt"
+            "$ndk_bin/llvm-nm" -D --defined-only \
+              "$evidence/elf/liborkela_android-$abi.so" \
+              > "$evidence/elf/EXPORTED-SYMBOLS-$abi.txt"
+            grep -F \
+              "Java_org_scenelith_orkela_MainActivity_nativeOpen" \
+              "$evidence/elf/EXPORTED-SYMBOLS-$abi.txt" > /dev/null
+          done
+          unzip -l "$app" "assets/emotional-piano.resonith" \
+            | grep -F "assets/emotional-piano.resonith" > /dev/null
+          actual_stream="$(
+            unzip -p "$app" assets/emotional-piano.resonith \
+              | sha256sum \
+              | cut -d' ' -f1
+          )"
+          test "$actual_stream" = "$EXPECTED_STREAM_SHA256"
+          sha256sum "$app" "$test_apk" > "$evidence/APK-SHA256SUMS"
+
+      - name: Validate Android 17 promotion machinery
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n platform/android/ci/prepare_android17_promotion.sh
+          bash -n platform/android/ci/run_emulator_gate.sh
+          python3 -m py_compile \
+            platform/android/ci/analyze_guest_boot_evidence.py \
+            platform/android/ci/reduce_android17_promotion.py \
+            platform/android/ci/verify_system_image_manifest.py
+          python3 -m unittest -q \
+            tests/test_analyze_guest_boot_evidence.py \
+            tests/test_reduce_android17_promotion.py \
+            tests/test_verify_system_image_manifest.py
+
+      - name: Prepare byte-verified Android 17 guests and Emulator 37.2.1
+        shell: bash
+        run: bash platform/android/ci/prepare_android17_promotion.sh
+
+      - name: Run exact APK gate on Android 8 / API 26
+        shell: bash
+        run: bash platform/android/ci/run_emulator_gate.sh 26 runtime 1
+
+      - name: Prove three fresh Android 17 / 4 KiB cold boots
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            bash platform/android/ci/run_emulator_gate.sh \
+              37 boot "$attempt"
+          done
+
+      - name: Prove three fresh Android 17 / 16 KiB cold boots
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            bash platform/android/ci/run_emulator_gate.sh \
+              37-16k boot "$attempt"
+          done
+
+      - name: Reduce the immutable six-cold-boot evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostics="build/mobile-evidence/android/diagnostics"
+          python3 platform/android/ci/reduce_android17_promotion.py \
+            cold \
+            "$diagnostics" \
+            platform/android/ci/android17_promotion_contract.json \
+            "$diagnostics/ANDROID17-COLD-PROMOTION.json"
+
+      - name: Run exact APK gate on a fresh Android 17 / 4 KiB boot
+        shell: bash
+        run: bash platform/android/ci/run_emulator_gate.sh 37 runtime 4
+
+      - name: Run exact APK gate on a fresh Android 17 / 16 KiB boot
+        shell: bash
+        run: bash platform/android/ci/run_emulator_gate.sh 37-16k runtime 4
+
+      - name: Reduce exact APK, certificate, stream, and PCM evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostics="build/mobile-evidence/android/diagnostics"
+          app="platform/android/app/build/outputs/apk/debug/app-debug.apk"
+          test_apk="platform/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          app_sha256="$(sha256sum "$app" | cut -d' ' -f1)"
+          test_apk_sha256="$(sha256sum "$test_apk" | cut -d' ' -f1)"
+          python3 platform/android/ci/reduce_android17_promotion.py \
+            final \
+            "$diagnostics" \
+            platform/android/ci/android17_promotion_contract.json \
+            "$diagnostics/ANDROID17-EXACT-APK-PROMOTION.json" \
+            --app-sha256 "$app_sha256" \
+            --test-apk-sha256 "$test_apk_sha256" \
+            --app-cert-sha256 "$ORKELA_APP_CERT_SHA256" \
+            --test-apk-cert-sha256 "$ORKELA_TEST_APK_CERT_SHA256" \
+            --source-sha "$GITHUB_SHA" \
+            --stream-sha256 "$EXPECTED_STREAM_SHA256" \
+            --pcm-sha256 "$EXPECTED_PCM_SHA256"
+          jq -e \
+            --arg app "$app_sha256" \
+            --arg test_apk "$test_apk_sha256" \
+            '
+              .native_decode == "pass"
+              and .app_sha256 == $app
+              and .test_apk_sha256 == $test_apk
+              and .audibility_claim == false
+            ' "$diagnostics/runtime-api26/RUNTIME-GATE.json"
+
+      - name: Package exact tested Android application
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="build/mobile-evidence/android"
+          product="$evidence/product"
+          mkdir -p "$product"
+          app="platform/android/app/build/outputs/apk/debug/app-debug.apk"
+          test_apk="platform/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          cp "$app" "$product/Orkela-Android-API26-37-debug.apk"
+          cp "$test_apk" "$product/Orkela-Android-API26-37-debug-test.apk"
+          cp \
+            "$evidence/diagnostics/ANDROID17-EXACT-APK-PROMOTION.json" \
+            "$product/ANDROID17-EXACT-APK-PROMOTION.json"
+          python3 - <<'PY' > "$product/BUILD-METADATA.json"
+          import json
+          import os
+          import subprocess
+
+          def output(*command):
+              return subprocess.check_output(
+                  command,
+                  text=True,
+                  stderr=subprocess.STDOUT,
+              ).strip()
+
+          print(json.dumps({
+              "schema": 1,
+              "product": "Orkela",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "runner_image": {
+                  "os": os.environ.get("ImageOS", "unknown"),
+                  "version": os.environ.get("ImageVersion", "unknown"),
+              },
+              "target": {
+                  "platform": "Android",
+                  "min_api": 26,
+                  "compile_api": 37,
+                  "target_api": 37,
+                  "abis": ["arm64-v8a", "x86_64"],
+                   "runtime_gates": [
+                     "x86_64 API 26 / 4 KiB pages",
+                     "x86_64 API 37 / 4 KiB pages: 3 cold + exact APK",
+                     "x86_64 API 37 / 16 KiB pages: 3 cold + exact APK"
+                   ],
+              },
+              "resonith_commit": os.environ["PINNED_RESONITH_COMMIT"],
+              "expected_stream_sha256": os.environ["EXPECTED_STREAM_SHA256"],
+              "expected_pcm16_sha256": os.environ["EXPECTED_PCM_SHA256"],
+              "java": output("java", "-version").splitlines()[0],
+              "integrity_claim": "exact GitHub-built APK and test certificate pair passed byte-verified Android 17 4 KiB/16 KiB guests; not audible-playback or physical-device proof",
+          }, indent=2, sort_keys=True))
+          PY
+          (
+            cd "$product"
+            find . -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+          )
+          tarball="Orkela-Android-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          tar -czf "$evidence/$tarball" -C "$product" .
+
+      - name: Upload exact tested Android application
+        id: upload-android-product
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-product-Android-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/mobile-evidence/android/Orkela-Android-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Android diagnostics
+        if: always()
+        id: upload-android-diagnostics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-diagnostics-Android-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/mobile-evidence/android/diagnostics
+            platform/android/app/build/reports
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop Android emulator
+        if: always()
+        shell: bash
+        run: adb emu kill >/dev/null 2>&1 || true
+
+      - name: Publish Android artifact identity
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Orkela Android"
+            echo "- Product artifact ID: ${{ steps.upload-android-product.outputs.artifact-id }}"
+            echo "- Product service digest: \`${{ steps.upload-android-product.outputs.artifact-digest }}\`"
+            echo "- Diagnostics artifact ID: ${{ steps.upload-android-diagnostics.outputs.artifact-id }}"
+            echo "- Runtime claim: the same APK/certificate pair passed API 26 and two fresh API 37 exact-APK boots after 3+3 cold boots of byte-verified 4 KiB/16 KiB guest payloads"
+            echo "- Android 17 graphics route: SwiftShader GL with GLDirectMem + shared host slots restored, GLDMA retained, and Vulkan/VNS/GuestAngle disabled; guest bytes are unchanged"
+            echo "- Play-control evidence requires AudioTrack queue acceptance; it never claims audibility"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-renderer-probe:
+    name: Android 17 renderer / ${{ matrix.renderer }}
+    if: github.event_name == 'workflow_dispatch' && inputs.renderer_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer:
+          - swiftshader
+          - lavapipe
+          - swangle
+          - host
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
         with:
           distribution: temurin
           java-version: "25"
 
-      - name: Select stable NDK r29
+      - name: Install exact Android 17 probe runtime
         shell: bash
         run: |
-          ndk="$ANDROID_HOME/ndk/29.0.14206865"
-          if [[ ! -d "$ndk" ]]; then
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-              "ndk;29.0.14206865"
-          fi
-          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            'libpulse0=1:16.1+dfsg1-2ubuntu10.1'
+          test "$(
+            dpkg-query -W -f='${Version}' libpulse0
+          )" = "1:16.1+dfsg1-2ubuntu10.1"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "system-images;android-37.0;google_apis;x86_64"
+          image="$ANDROID_HOME/system-images/android-37.0/google_apis/x86_64"
+          test -d "$image"
+          (
+            cd "$image"
+            printf '%s  %s\n' \
+              4b8a752539c967c3959af6768c1e118a0e41b36b53dcf03a122a011725c14896 kernel-ranchu \
+              1a3822e981bd07308b48882d205e91e893eff40a27e566a84b597180f2ad426b ramdisk.img \
+              ca98470938276fbdf5501dfda3c276a5b43e32514900f2ceeec808bdc7711d17 system.img \
+              fb76b3cb619100e5d63f5147be982bb31afeb9beb726e82ce9239d295487ad9b vendor.img \
+              bf15b0b43bd0155b258b3756cf523dd917735042633edbb645b34c285a45832d source.properties \
+              7e0d7d2acf0ded1bc4b445356d93fd6759c99956620c4141cd63f7363c326149 advancedFeatures.ini \
+              9a7e1122391cf8e23674d8c293b81faa3be4163886c976a478864be062ffe5ba build.prop \
+              | sha256sum -c -
+          )
+          echo "ORKELA_IMAGE_HASHES_VERIFIED=true" >> "$GITHUB_ENV"
+          echo "ORKELA_EXPECTED_GUEST_HASH_SET=android17-r06-google-apis-x86_64-4k-v1" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_GUEST_HASH_SET=android17-r06-google-apis-x86_64-4k-v1" \
+            >> "$GITHUB_ENV"
 
-      - name: Build debug APK
-        working-directory: platform/android
-        run: ./gradlew :app:assembleDebug --no-daemon
+          archive="$RUNNER_TEMP/emulator-linux_x64-15507667.zip"
+          pinned="$RUNNER_TEMP/android-emulator-36.6.11"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://dl.google.com/android/repository/emulator-linux_x64-15507667.zip"
+          printf '%s  %s\n' \
+            f8d8b83cf21a04966326eb1378bacda255f63b93 \
+            "$archive" \
+            | sha1sum -c -
+          expected_archive_sha256="1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830"
+          actual_archive_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
+          test "$actual_archive_sha256" = "$expected_archive_sha256"
+          mkdir -p "$pinned"
+          unzip -q "$archive" -d "$pinned"
+          emulator_bin="$pinned/emulator/emulator"
+          test -x "$emulator_bin"
+          emulator_version_output="$(
+            "$emulator_bin" -version 2>&1 \
+              || true
+          )"
+          printf '%s\n' "$emulator_version_output"
+          parsed_emulator_version="$(
+            printf '%s\n' "$emulator_version_output" \
+              | sed -n \
+                's/^.*Android emulator version \([^ ]*\).*/\1/p' \
+              | head -n 1
+          )"
+          printf 'Parsed emulator version: %s\n' "$parsed_emulator_version"
+          test "$parsed_emulator_version" = "36.6.11.0"
+          echo "ORKELA_EMULATOR_BIN=$emulator_bin" >> "$GITHUB_ENV"
+          echo "ORKELA_EXPECTED_EMULATOR_VERSION=36.6.11.0" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_REVISION=36.6.11" >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_BUILD_ID=15507667" >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_URL=https://dl.google.com/android/repository/emulator-linux_x64-15507667.zip" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_SHA1=f8d8b83cf21a04966326eb1378bacda255f63b93" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_SHA256=$actual_archive_sha256" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_SIZE=331232577" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_VERIFIED=true" >> "$GITHUB_ENV"
+          sudo chown "$(id -un)" /dev/kvm
 
-      - name: Verify APK
+      - name: Probe renderer without installing Orkela
         shell: bash
         run: |
-          apk="platform/android/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$apk"
-          unzip -t "$apk"
-          unzip -l "$apk" | grep -q 'lib/arm64-v8a/liborkela_android.so'
-          unzip -l "$apk" | grep -q 'lib/x86_64/liborkela_android.so'
-          unzip -l "$apk" | grep -q 'assets/emotional-piano.resonith'
-          stat --printf='%n %s bytes\n' "$apk"
-          sha256sum "$apk"
+          bash platform/android/ci/probe_renderer.sh \
+            "${{ matrix.renderer }}"
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish renderer evidence
+        if: always()
+        id: upload-probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Orkela-Android-debug
-          path: platform/android/app/build/outputs/apk/debug/app-debug.apk
+          name: Orkela-Android17-renderer-${{ matrix.renderer }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android37-renderer-probe/${{ matrix.renderer }}
           if-no-files-found: error
+          retention-days: 14
 
-  ios:
-    name: ${{ matrix.preset }}
-    runs-on: macos-26
+      - name: Summarize renderer result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="build/android37-renderer-probe/${{ matrix.renderer }}/PROBE-RESULT.json"
+          test -s "$result"
+          {
+            echo "### Android 17 renderer: ${{ matrix.renderer }}"
+            echo "- Stable: $(jq -r .stable "$result")"
+            echo "- Stage-1 candidate: $(jq -r .stage1_candidate "$result")"
+            echo "- Known control crash: $(jq -r .known_control_crash_reproduced "$result")"
+            echo "- Effective renderer: $(jq -r .effective_renderer_line "$result")"
+            echo "- Exact environment: $(jq -r .environment_exact "$result")"
+            echo "- Healthy observations: $(jq -r .soak.healthy_observations "$result") / 24"
+            echo "- SurfaceFlinger PID changes: $(jq -r .soak.pid_changes "$result")"
+            echo "- Crash signatures: $(jq -r .soak.crash_signatures "$result")"
+            echo "- Valid screenshots: $(jq -r .soak.valid_screenshots "$result") / 4"
+            echo "- Artifact ID: ${{ steps.upload-probe.outputs.artifact-id }}"
+            echo "- Diagnostic only: no Orkela APK was installed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-renderer-assessment:
+    name: Android 17 renderer assessment
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.renderer_probe == true
+    needs:
+      - android-renderer-probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download every renderer result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Orkela-Android17-renderer-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-artifacts
+
+      - name: Reduce matrix into one evidence verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = sorted(
+              Path("probe-artifacts").glob("**/PROBE-RESULT.json")
+          )
+          if len(paths) != 4:
+              raise SystemExit(
+                  f"expected four renderer results, found {len(paths)}"
+              )
+          results = {}
+          for path in paths:
+              result = json.loads(path.read_text(encoding="utf-8"))
+              renderer = result["renderer"]
+              if renderer in results:
+                  raise SystemExit(f"duplicate renderer result: {renderer}")
+              results[renderer] = result
+          expected = {"swiftshader", "lavapipe", "swangle", "host"}
+          if set(results) != expected:
+              raise SystemExit(
+                  f"unexpected renderer set: {sorted(results)}"
+              )
+
+          control = results["swiftshader"]
+          control_reproduced = (
+              control["environment_exact"]
+              and control["crash_evidence_complete"]
+              and control["known_control_crash_reproduced"]
+              and control["known_failing_tuple"]
+              and control["effective_renderer_count"] == 1
+              and (
+                  "setCurrentRenderer: swiftshader swiftshader"
+                  in control["effective_renderer_line"]
+              )
+              and not control["stable"]
+          )
+          candidates = [
+              renderer
+              for renderer in ("lavapipe", "swangle")
+              if results[renderer]["stage1_candidate"]
+          ]
+          assessment = {
+              "schema": 1,
+              "control_reproduced": control_reproduced,
+              "stage1_candidates": candidates,
+              "host_is_diagnostic_only": True,
+              "results": results,
+          }
+          Path("ANDROID17-RENDERER-ASSESSMENT.json").write_text(
+              json.dumps(assessment, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          if not control_reproduced:
+              raise SystemExit(
+                  "swiftshader did not reproduce the exact known crash"
+              )
+          if not candidates:
+              raise SystemExit(
+                  "no deterministic renderer passed the Stage-1 gate"
+              )
+          PY
+          {
+            echo "## Android 17 renderer assessment"
+            echo "- Control crash reproduced: $(jq -r .control_reproduced ANDROID17-RENDERER-ASSESSMENT.json)"
+            echo "- Stage-1 candidates: $(jq -r '.stage1_candidates | join(\", \")' ANDROID17-RENDERER-ASSESSMENT.json)"
+            echo "- Next required gate: 3 cold 4K boots, then 3 cold 16K boots and the full Orkela APK gate"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload renderer assessment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-renderer-assessment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ANDROID17-RENDERER-ASSESSMENT.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  android-emulator-probe:
+    name: Android 17 Emulator / ${{ matrix.cell_id }}
+    if: github.event_name == 'workflow_dispatch' && inputs.emulator_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        preset:
-          - ios-device-arm64
-          - ios-simulator-x86_64
+        include:
+          - cell_id: control-36_6_11-swiftshader
+            renderer: swiftshader
+            revision: 36.6.11
+            build_id: "15507667"
+            archive_sha1: f8d8b83cf21a04966326eb1378bacda255f63b93
+            archive_sha256: 1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830
+            archive_size: "331232577"
+            binary_version: 36.6.11.0
+          - cell_id: candidate-37_1_10-swiftshader
+            renderer: swiftshader
+            revision: 37.1.10
+            build_id: "15888535"
+            archive_sha1: 489e57e560e310f9dfadf098951a713bf5651cd2
+            archive_sha256: 5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317
+            archive_size: "334377561"
+            binary_version: 37.1.10.0
+          - cell_id: candidate-37_1_10-swangle
+            renderer: swangle
+            revision: 37.1.10
+            build_id: "15888535"
+            archive_sha1: 489e57e560e310f9dfadf098951a713bf5651cd2
+            archive_sha256: 5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317
+            archive_size: "334377561"
+            binary_version: 37.1.10.0
+          - cell_id: candidate-37_1_10-lavapipe
+            renderer: lavapipe
+            revision: 37.1.10
+            build_id: "15888535"
+            archive_sha1: 489e57e560e310f9dfadf098951a713bf5651cd2
+            archive_sha256: 5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317
+            archive_size: "334377561"
+            binary_version: 37.1.10.0
+          - cell_id: candidate-37_2_1-swiftshader
+            renderer: swiftshader
+            revision: 37.2.1
+            build_id: "15875889"
+            archive_sha1: 1c39ceb4bca042b973344d252a051189d367ab83
+            archive_sha256: 3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d
+            archive_size: "346539649"
+            binary_version: 37.2.1.0
+          - cell_id: candidate-37_2_1-swangle
+            renderer: swangle
+            revision: 37.2.1
+            build_id: "15875889"
+            archive_sha1: 1c39ceb4bca042b973344d252a051189d367ab83
+            archive_sha256: 3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d
+            archive_size: "346539649"
+            binary_version: 37.2.1.0
+          - cell_id: candidate-37_2_1-lavapipe
+            renderer: lavapipe
+            revision: 37.2.1
+            build_id: "15875889"
+            archive_sha1: 1c39ceb4bca042b973344d252a051189d367ab83
+            archive_sha256: 3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d
+            archive_size: "346539649"
+            binary_version: 37.2.1.0
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - name: Select stable Xcode
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Install exact guest and Emulator package
         shell: bash
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.4.1.app
-          xcodebuild -version
-          cmake --version
+          bash platform/android/ci/prepare_emulator_probe.sh \
+            "${{ matrix.revision }}" \
+            "${{ matrix.build_id }}" \
+            "${{ matrix.archive_sha1 }}" \
+            "${{ matrix.archive_sha256 }}" \
+            "${{ matrix.archive_size }}" \
+            "${{ matrix.binary_version }}"
 
-      - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
-
-      - name: Build
+      - name: Probe exact version and renderer
         shell: bash
         run: |
-          set +e
-          cmake --build --preset ${{ matrix.preset }} 2>&1 \
-            | tee xcode-build.log
-          status=${PIPESTATUS[0]}
-          set -e
-          if [[ $status -ne 0 ]]; then
-            grep -E '(^|: )(fatal )?error:|Undefined symbols|undefined symbol|ld:' \
-              xcode-build.log \
-              | tail -40 \
-              | while IFS= read -r line; do
-                  line="${line//'%'/'%25'}"
-                  line="${line//$'\r'/'%0D'}"
-                  echo "::error title=Xcode::$line"
-                done
-            exit "$status"
+          bash platform/android/ci/probe_renderer.sh \
+            "${{ matrix.renderer }}" \
+            "${{ matrix.cell_id }}"
+
+      - name: Upload exact probe evidence
+        if: always()
+        id: upload-emulator-probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-emulator-${{ matrix.cell_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android37-renderer-probe/${{ matrix.cell_id }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize exact probe result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="build/android37-renderer-probe/${{ matrix.cell_id }}/PROBE-RESULT.json"
+          test -s "$result"
+          {
+            echo "### Android 17 Emulator: ${{ matrix.cell_id }}"
+            echo "- Stable: $(jq -r .stable "$result")"
+            echo "- Stage-1 candidate: $(jq -r .stage1_candidate "$result")"
+            echo "- Exact control crash: $(jq -r .known_control_crash_reproduced "$result")"
+            echo "- Effective renderer: $(jq -r .effective_renderer_line "$result")"
+            echo "- Exact environment: $(jq -r .environment_exact "$result")"
+            echo "- Healthy observations: $(jq -r .soak.healthy_observations "$result") / 24"
+            echo "- SurfaceFlinger PID changes: $(jq -r .soak.pid_changes "$result")"
+            echo "- Crash signatures: $(jq -r .soak.crash_signatures "$result")"
+            echo "- Valid screenshots: $(jq -r .soak.valid_screenshots "$result") / 4"
+            echo "- Artifact ID: ${{ steps.upload-emulator-probe.outputs.artifact-id }}"
+            echo "- Diagnostic only: no Orkela APK was installed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-emulator-assessment:
+    name: Android 17 Emulator assessment
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.emulator_probe == true
+    needs:
+      - android-emulator-probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out evidence reducer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download every version-scoped probe result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Orkela-Android17-emulator-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-artifacts
+
+      - name: Reduce exact matrix into one evidence verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 platform/android/ci/reduce_emulator_probe.py \
+            probe-artifacts \
+            ANDROID17-EMULATOR-ASSESSMENT.json \
+            PROMOTION-CANDIDATE.json
+          {
+            echo "## Android 17 Emulator assessment"
+            echo "- Control crash reproduced: $(jq -r .control_reproduced ANDROID17-EMULATOR-ASSESSMENT.json)"
+            echo "- Stage-1 candidates: $(jq -r '.stage1_candidates | join(\", \")' ANDROID17-EMULATOR-ASSESSMENT.json)"
+            echo "- Promotion candidate: $(jq -r .cell_id PROMOTION-CANDIDATE.json)"
+            echo "- Next gate: same archive and tuple, 3 cold 4K + 3 cold 16K boots, then the exact Orkela APK pair"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload exact assessment and promotion identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-emulator-assessment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ANDROID17-EMULATOR-ASSESSMENT.json
+            PROMOTION-CANDIDATE.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  android-vulkan-swapchain-probe:
+    name: Android 17 Vulkan composition / ${{ matrix.cell_id }}
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && inputs.vulkan_swapchain_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell_id: control-37_2_1-swiftshader-feature-off
+            renderer: swiftshader
+            feature_profile: default
+          - cell_id: candidate-37_2_1-swiftshader-vulkan-swapchain
+            renderer: swiftshader
+            feature_profile: vulkan-native-swapchain
+          - cell_id: candidate-37_2_1-swangle-vulkan-swapchain
+            renderer: swangle
+            feature_profile: vulkan-native-swapchain
+          - cell_id: candidate-37_2_1-lavapipe-vulkan-swapchain
+            renderer: lavapipe
+            feature_profile: vulkan-native-swapchain
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Validate probe shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n platform/android/ci/prepare_emulator_probe.sh
+          bash -n platform/android/ci/probe_renderer.sh
+
+      - name: Install exact Android 17 guest and Emulator 37.2.1
+        shell: bash
+        run: |
+          bash platform/android/ci/prepare_emulator_probe.sh \
+            37.2.1 \
+            15875889 \
+            1c39ceb4bca042b973344d252a051189d367ab83 \
+            3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d \
+            346539649 \
+            37.2.1.0
+
+      - name: Probe exact host-composition route
+        shell: bash
+        run: |
+          bash platform/android/ci/probe_renderer.sh \
+            "${{ matrix.renderer }}" \
+            "${{ matrix.cell_id }}" \
+            "${{ matrix.feature_profile }}"
+
+      - name: Upload Vulkan composition evidence
+        if: always()
+        id: upload-vulkan-probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-vulkan-swapchain-${{ matrix.cell_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android37-renderer-probe/${{ matrix.cell_id }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize host-composition result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="build/android37-renderer-probe/${{ matrix.cell_id }}/PROBE-RESULT.json"
+          test -s "$result"
+          {
+            echo "### Android 17 Vulkan composition: ${{ matrix.cell_id }}"
+            echo "- Stable: $(jq -r .stable "$result")"
+            echo "- Stage-1 candidate: $(jq -r .stage1_candidate "$result")"
+            echo "- Same-run control crash: $(jq -r .known_control_crash_reproduced "$result")"
+            echo "- Effective renderer: $(jq -r .effective_renderer_line "$result")"
+            echo "- Requested VulkanNativeSwapchain: $(jq -r .host_feature.requested_vulkan_native_swapchain "$result")"
+            echo "- Effective VulkanNativeSwapchain: $(jq -r .host_feature.effective_vulkan_native_swapchain "$result")"
+            echo "- Exact environment: $(jq -r .environment_exact "$result")"
+            echo "- Healthy observations: $(jq -r .soak.healthy_observations "$result") / 24"
+            echo "- SurfaceFlinger PID changes: $(jq -r .soak.pid_changes "$result")"
+            echo "- Crash signatures: $(jq -r .soak.crash_signatures "$result")"
+            echo "- Valid screenshots: $(jq -r .soak.valid_screenshots "$result") / 4"
+            echo "- Artifact ID: ${{ steps.upload-vulkan-probe.outputs.artifact-id }}"
+            echo "- Diagnostic only: no Orkela APK was installed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-vulkan-swapchain-assessment:
+    name: Android 17 Vulkan composition assessment
+    if: >-
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && inputs.vulkan_swapchain_probe == true
+    needs:
+      - android-vulkan-swapchain-probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out evidence reducer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download every host-composition result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Orkela-Android17-vulkan-swapchain-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-artifacts
+
+      - name: Reduce causal A/B matrix into one evidence verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 platform/android/ci/reduce_emulator_probe.py \
+            probe-artifacts \
+            ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json \
+            PROMOTION-CANDIDATE.json
+          {
+            echo "## Android 17 Vulkan composition assessment"
+            echo "- Same-run control crash reproduced: $(jq -r .control_reproduced ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json)"
+            echo "- Stage-1 candidates: $(jq -r '.stage1_candidates | join(\", \")' ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json)"
+            echo "- Promotion candidate: $(jq -r .cell_id PROMOTION-CANDIDATE.json)"
+            echo "- Next gate: exact archive, tuple, and effective feature state; 3 cold 4K + 3 cold 16K boots; then the exact Orkela APK pair"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload causal assessment and promotion identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-vulkan-swapchain-assessment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json
+            PROMOTION-CANDIDATE.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  android-vulkan-backend-probe:
+    name: Android 17 ReadColorBufferDMA / same-host causal A/B
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && inputs.vulkan_backend_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Validate diagnostic syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n platform/android/ci/prepare_emulator_probe.sh
+          bash -n platform/android/ci/probe_renderer.sh
+          python3 -m py_compile \
+            platform/android/ci/analyze_guest_boot_evidence.py \
+            platform/android/ci/reduce_emulator_probe.py \
+            platform/android/ci/assess_read_color_buffer_dma_probe.py
+
+      - name: Install exact Android 17 guest and Emulator 37.2.1
+        shell: bash
+        run: |
+          bash platform/android/ci/prepare_emulator_probe.sh \
+            37.2.1 \
+            15875889 \
+            1c39ceb4bca042b973344d252a051189d367ab83 \
+            3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d \
+            346539649 \
+            37.2.1.0
+
+      - name: Probe missing then restored DMA prerequisites on one runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash platform/android/ci/probe_renderer.sh \
+            swiftshader \
+            control-37_2_1-read-color-buffer-dma-off \
+            read-color-buffer-dma-off \
+            soak
+          bash platform/android/ci/probe_renderer.sh \
+            swiftshader \
+            candidate-37_2_1-read-color-buffer-dma-on \
+            read-color-buffer-dma-on \
+            soak
+
+      - name: Assess exact same-host intervention
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 platform/android/ci/assess_read_color_buffer_dma_probe.py \
+            build/android37-renderer-probe/control-37_2_1-read-color-buffer-dma-off/PROBE-RESULT.json \
+            build/android37-renderer-probe/candidate-37_2_1-read-color-buffer-dma-on/PROBE-RESULT.json \
+            ANDROID17-READ-COLOR-BUFFER-DMA-ASSESSMENT.json
+
+      - name: Summarize exact backend result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          assessment="ANDROID17-READ-COLOR-BUFFER-DMA-ASSESSMENT.json"
+          if [[ -s "$assessment" ]]; then
+            {
+              echo "## Android 17 ReadColorBufferDMA causal A/B"
+              echo "- Status: $(jq -r .status "$assessment")"
+              echo "- Same host identity: $(jq -r .same_host_identity "$assessment")"
+              echo "- Promotion eligible: $(jq -r .promotion_eligible "$assessment")"
+              echo "- Control target crashes: $(jq -r .control.target_crash_signatures "$assessment")"
+              echo "- Candidate healthy observations: $(jq -r .candidate.healthy_observations "$assessment") / 24"
+              echo "- Candidate target crashes: $(jq -r .candidate.target_crash_signatures "$assessment")"
+              echo "- Host-parsed API level: $(jq -r .host_api_decision_level "$assessment")"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No provenance-valid backend assessment was produced." \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Verify application bundle
+      - name: Upload diagnostic evidence and assessment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-read-color-buffer-dma-ab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/android37-renderer-probe/control-37_2_1-read-color-buffer-dma-off
+            build/android37-renderer-probe/candidate-37_2_1-read-color-buffer-dma-on
+            ANDROID17-READ-COLOR-BUFFER-DMA-ASSESSMENT.json
+          if-no-files-found: error
+          retention-days: 14
+
+  ios:
+    name: iOS ${{ matrix.target }}
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || (
+        inputs.renderer_probe != true
+        && inputs.emulator_probe != true
+        && inputs.vulkan_swapchain_probe != true
+        && inputs.vulkan_backend_probe != true
+      )
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: ios-device-arm64
+            target: device-arm64-unsigned
+            runner: macos-26
+            expected_arch: arm64
+            sdk: iphoneos
+            runtime: false
+          - preset: ios-simulator-arm64
+            target: simulator-arm64-runtime
+            runner: macos-26
+            expected_arch: arm64
+            sdk: iphonesimulator
+            runtime: true
+          - preset: ios-simulator-x86_64
+            target: simulator-x86_64-compile
+            runner: macos-26-intel
+            expected_arch: x86_64
+            sdk: iphonesimulator
+            runtime: false
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select newest installed stable Xcode
         shell: bash
         run: |
+          set -euo pipefail
+          xcode_path="$(
+            python3 - <<'PY'
+          import glob
+          import re
+
+          candidates = []
+          for path in glob.glob("/Applications/Xcode_*.app"):
+              if "beta" in path.lower() or "rc" in path.lower():
+                  continue
+              match = re.search(r"Xcode_([0-9]+(?:\.[0-9]+)*)", path)
+              if match:
+                  version = tuple(int(part) for part in match.group(1).split("."))
+                  candidates.append((version, path))
+          if not candidates:
+              raise SystemExit("No stable Xcode installation was found")
+          print(max(candidates)[1])
+          PY
+          )"
+          sudo xcode-select -s "$xcode_path"
+          xcodebuild -version
+          xcrun --sdk "${{ matrix.sdk }}" --show-sdk-version
+
+      - name: Configure and build exact iOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --preset "${{ matrix.preset }}"
+          cmake --build --preset "${{ matrix.preset }}"
+
+      - name: Locate and verify exact iOS bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="build/mobile-evidence/${{ matrix.preset }}/diagnostics"
+          mkdir -p "$evidence/logs"
           app="$(find "build/${{ matrix.preset }}" \
             -type d -name OrkelaIOS.app -print -quit)"
           test -n "$app"
           test -s "$app/OrkelaIOS"
-          xcrun lipo -info "$app/OrkelaIOS"
+          printf '%s\n' "$app" > "$evidence/app-path.txt"
+          xcrun lipo -archs "$app/OrkelaIOS" | tr ' ' '\n' \
+            | grep -Fxq "${{ matrix.expected_arch }}"
+          test "$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleIdentifier' "$app/Info.plist"
+          )" = "org.scenelith.orkela"
+          test "$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleShortVersionString' "$app/Info.plist"
+          )" = "0.3.0"
+          test "$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleVersion' "$app/Info.plist"
+          )" = "30006"
           test -s "$app/emotional-piano.resonith"
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$app" "Orkela-${{ matrix.preset }}.zip"
-          stat -f '%N %z bytes' "Orkela-${{ matrix.preset }}.zip"
-          shasum -a 256 "Orkela-${{ matrix.preset }}.zip"
+          test "$(
+            shasum -a 256 "$app/emotional-piano.resonith" | awk '{print $1}'
+          )" = "$EXPECTED_STREAM_SHA256"
+          xcrun vtool -show-build "$app/OrkelaIOS" \
+            > "$evidence/LOAD-COMMANDS.txt"
 
-      - uses: actions/upload-artifact@v4
+      - name: Ad-hoc sign, install, launch, and verify simulator decode
+        if: matrix.runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="build/mobile-evidence/${{ matrix.preset }}/diagnostics"
+          app="$(cat "$evidence/app-path.txt")"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dvv "$app" 2> "$evidence/CODE-SIGNATURE.txt"
+
+          runtime="$(
+            xcrun simctl list runtimes -j \
+              | jq -r '
+                [
+                  .runtimes[]
+                  | select(.isAvailable and (.identifier | contains("iOS")))
+                ]
+                | sort_by(.version)
+                | last
+                | .identifier
+              '
+          )"
+          test -n "$runtime"
+          udid=""
+          while IFS= read -r device_type; do
+            candidate=""
+            if candidate="$(
+              xcrun simctl create \
+                "Orkela-CI-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                "$device_type" \
+                "$runtime" \
+                2>/dev/null \
+            )"; then
+              if [[ "$candidate" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+                udid="$candidate"
+                break
+              fi
+            fi
+          done < <(
+            xcrun simctl list devicetypes -j \
+              | jq -r '
+                [
+                  .devicetypes[]
+                  | select(.name | startswith("iPhone"))
+                ]
+                | reverse[]
+                | .identifier
+              '
+          )
+          if [[ -z "$udid" ]]; then
+            echo "No installed iPhone device type supports runtime $runtime" >&2
+            exit 1
+          fi
+          printf '%s\n' "$udid" > "$evidence/simulator-udid.txt"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" "$app"
+          container="$(
+            xcrun simctl get_app_container \
+              "$udid" org.scenelith.orkela data
+          )"
+          find "$container/Documents" -type f -print | sort \
+            > "$evidence/APP-DATA-BEFORE.txt"
+          SIMCTL_CHILD_ORKELA_CI_SMOKE=1 \
+            xcrun simctl launch --terminate-running-process \
+              "$udid" org.scenelith.orkela \
+              | tee "$evidence/logs/simctl-launch.txt"
+
+          marker="$container/Documents/orkela-ci-smoke.json"
+          ready=0
+          for _ in $(seq 1 120); do
+            if [[ -s "$marker" ]]; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          cp "$marker" "$evidence/orkela-ci-smoke.json"
+          jq -e \
+            --arg expected "$EXPECTED_PCM_SHA256" \
+            '
+              .schema == 1
+              and .status == "pass"
+              and .sample_rate == 44100
+              and .channels == 2
+              and .frames == 352800
+              and .pcm16_sha256 == $expected
+            ' "$evidence/orkela-ci-smoke.json"
+          xcrun simctl io "$udid" screenshot "$evidence/orkela-ios.png"
+          xcrun simctl spawn "$udid" log show \
+            --last 5m \
+            --style compact \
+            --predicate 'process == "OrkelaIOS"' \
+            > "$evidence/logs/orkela-ios.log"
+          grep -Fq "ORKELA_CI_SMOKE PASS" \
+            "$evidence/logs/orkela-ios.log"
+          find "$container/Documents" -type f -print | sort \
+            > "$evidence/APP-DATA-AFTER.txt"
+          comm -13 \
+            "$evidence/APP-DATA-BEFORE.txt" \
+            "$evidence/APP-DATA-AFTER.txt" \
+            > "$evidence/NEW-APP-DATA-FILES.txt"
+          printf '%s\n' "$marker" \
+            > "$evidence/EXPECTED-NEW-APP-DATA-FILES.txt"
+          diff -u \
+            "$evidence/EXPECTED-NEW-APP-DATA-FILES.txt" \
+            "$evidence/NEW-APP-DATA-FILES.txt"
+
+      - name: Stop and delete iOS simulator
+        if: always() && matrix.runtime
+        shell: bash
+        run: |
+          evidence="build/mobile-evidence/${{ matrix.preset }}/diagnostics"
+          if [[ -s "$evidence/simulator-udid.txt" ]]; then
+            udid="$(cat "$evidence/simulator-udid.txt")"
+            xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+            xcrun simctl delete "$udid" >/dev/null 2>&1 || true
+          fi
+
+      - name: Package exact iOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="build/mobile-evidence/${{ matrix.preset }}"
+          diagnostics="$evidence/diagnostics"
+          product="$evidence/product"
+          mkdir -p "$product"
+          app="$(cat "$diagnostics/app-path.txt")"
+          archive="Orkela-${{ matrix.target }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$product/$archive"
+          if [[ "${{ matrix.runtime }}" == "true" ]]; then
+            signature="ad-hoc simulator signature"
+          else
+            signature="unsigned compile/link evidence"
+          fi
+          TARGET_NAME="${{ matrix.target }}" \
+          TARGET_ARCH="${{ matrix.expected_arch }}" \
+          TARGET_SDK="${{ matrix.sdk }}" \
+          SIGNATURE_CLAIM="$signature" \
+          python3 - <<'PY' > "$product/BUILD-METADATA.json"
+          import json
+          import os
+          import subprocess
+
+          def output(*command):
+              return subprocess.check_output(command, text=True).strip()
+
+          print(json.dumps({
+              "schema": 1,
+              "product": "Orkela",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "runner_image": {
+                  "os": os.environ.get("ImageOS", "unknown"),
+                  "version": os.environ.get("ImageVersion", "unknown"),
+              },
+              "target": {
+                  "platform": "iOS",
+                  "name": os.environ["TARGET_NAME"],
+                  "architecture": os.environ["TARGET_ARCH"],
+                  "sdk": os.environ["TARGET_SDK"],
+                  "deployment_floor": "15.0",
+                  "signature": os.environ["SIGNATURE_CLAIM"],
+              },
+              "resonith_commit": os.environ["PINNED_RESONITH_COMMIT"],
+              "expected_stream_sha256": os.environ["EXPECTED_STREAM_SHA256"],
+              "expected_pcm16_sha256": os.environ["EXPECTED_PCM_SHA256"],
+              "xcode": output("xcodebuild", "-version").splitlines(),
+              "integrity_claim": "exact GitHub-built app bundle; no device-install, audibility, or App Store claim",
+          }, indent=2, sort_keys=True))
+          PY
+          (
+            cd "$product"
+            find . -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 shasum -a 256 > SHA256SUMS
+          )
+          tarball="Orkela-${{ matrix.preset }}-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          tar -czf "$evidence/$tarball" -C "$product" .
+
+      - name: Upload exact iOS application
+        id: upload-ios-product
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Orkela-${{ matrix.preset }}
-          path: Orkela-${{ matrix.preset }}.zip
+          name: Orkela-product-${{ matrix.preset }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/mobile-evidence/${{ matrix.preset }}/Orkela-${{ matrix.preset }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}.tar.gz
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload iOS diagnostics
+        if: always()
+        id: upload-ios-diagnostics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-diagnostics-${{ matrix.preset }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/mobile-evidence/${{ matrix.preset }}/diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish iOS artifact identity
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Orkela iOS ${{ matrix.target }}"
+            echo "- Product artifact ID: ${{ steps.upload-ios-product.outputs.artifact-id }}"
+            echo "- Product service digest: \`${{ steps.upload-ios-product.outputs.artifact-digest }}\`"
+            echo "- Diagnostics artifact ID: ${{ steps.upload-ios-diagnostics.outputs.artifact-id }}"
+            echo "- Runtime gate: ${{ matrix.runtime }}"
+            echo "- Device bundle is unsigned; simulator runtime bundle is ad-hoc signed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  orkela-mobile-gate:
+    name: orkela-mobile-gate
+    if: >-
+      always()
+      && (
+        github.event_name != 'workflow_dispatch'
+        || (
+          inputs.renderer_probe != true
+          && inputs.emulator_probe != true
+          && inputs.vulkan_swapchain_probe != true
+          && inputs.vulkan_backend_probe != true
+        )
+      )
+    needs:
+      - android
+      - ios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require every mobile application job
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.android.result }}" = "success"
+          test "${{ needs.ios.result }}" = "success"
+
+      - name: Build authoritative successful-run artifact index
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          suffix="-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cat > expected-artifact-names.txt <<EOF
+          Orkela-diagnostics-Android${suffix}
+          Orkela-diagnostics-ios-device-arm64${suffix}
+          Orkela-diagnostics-ios-simulator-arm64${suffix}
+          Orkela-diagnostics-ios-simulator-x86_64${suffix}
+          Orkela-product-Android${suffix}
+          Orkela-product-ios-device-arm64${suffix}
+          Orkela-product-ios-simulator-arm64${suffix}
+          Orkela-product-ios-simulator-x86_64${suffix}
+          EOF
+          sort -o expected-artifact-names.txt expected-artifact-names.txt
+
+          ready=0
+          for _ in $(seq 1 12); do
+            curl --fail --silent --show-error \
+              --retry 3 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2026-03-10" \
+              "$api" \
+              > all-run-artifacts.json
+            jq -r \
+              --arg suffix "$suffix" \
+              '.artifacts[] | select(.name | endswith($suffix)) | .name' \
+              all-run-artifacts.json \
+              | sort \
+              > actual-artifact-names.txt
+            if diff -u \
+                expected-artifact-names.txt \
+                actual-artifact-names.txt \
+                >/dev/null \
+                && jq -e \
+                  --arg suffix "$suffix" \
+                  --arg sha "$GITHUB_SHA" \
+                  '
+                    [
+                      .artifacts[]
+                      | select(.name | endswith($suffix))
+                    ] as $current
+                    | ($current | length) == 8
+                    and (
+                      $current
+                      | all(
+                          (.digest | type) == "string"
+                          and (
+                            (.digest // "")
+                            | test("^sha256:[0-9a-f]{64}$")
+                          )
+                          and .expired == false
+                          and .workflow_run.head_sha == $sha
+                        )
+                    )
+                  ' all-run-artifacts.json >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ready" -eq 1
+          diff -u expected-artifact-names.txt actual-artifact-names.txt
+
+          jq \
+            --arg suffix "$suffix" \
+            --arg sha "$GITHUB_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson attempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schema: 1,
+              product: "Orkela",
+              source_sha: $sha,
+              run_id: $run_id,
+              run_attempt: $attempt,
+              stable_gate: "orkela-mobile-gate",
+              claim: "GitHub artifact integrity/provenance index; not reproducible-build proof",
+              artifacts: [
+                .artifacts[]
+                | select(.name | endswith($suffix))
+                | {
+                    class: (
+                      if (.name | startswith("Orkela-product-"))
+                      then "passing-product"
+                      else "diagnostic"
+                      end
+                    ),
+                    id,
+                    name,
+                    size_in_bytes,
+                    archive_download_url,
+                    digest,
+                    expired,
+                    created_at,
+                    expires_at
+                  }
+              ]
+            }' all-run-artifacts.json > run-index.json
+          test "$(
+            jq '[.artifacts[] | select(.class == "passing-product")] | length' \
+              run-index.json
+          )" -eq 4
+          sha256sum run-index.json > run-index.SHA256SUMS
+
+      - name: Upload authoritative run index
+        id: upload-index
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-run-index-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            run-index.json
+            run-index.SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish stable gate summary
+        shell: bash
+        run: |
+          {
+            echo "## Orkela mobile application gate passed"
+            echo "- Source: \`${GITHUB_SHA}\`"
+            echo "- Run: ${GITHUB_RUN_ID}, attempt ${GITHUB_RUN_ATTEMPT}"
+            echo "- Index artifact ID: ${{ steps.upload-index.outputs.artifact-id }}"
+            echo "- Index service digest: \`${{ steps.upload-index.outputs.artifact-digest }}\`"
+            echo "- Android: the same target-37 APK passes API 26 and API 37 with 4 KiB pages, plus API 37 with 16 KiB pages"
+            echo "- iOS simulator ARM64: install/launch plus exact native decode/PCM hash"
+            echo "- iOS device ARM64 and simulator x86_64: compile/package coverage"
+            echo "- No audibility, physical-device, App Store, signed-device IPA, or reproducible-build claim"
+          } >> "$GITHUB_STEP_SUMMARY"

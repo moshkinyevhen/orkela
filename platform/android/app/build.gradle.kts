@@ -6,15 +6,20 @@ val localResonithSource = System.getenv("ORKELA_RESONITH_SOURCE_DIR")
 
 android {
     namespace = "org.scenelith.orkela"
-    compileSdk = 36
+    // API 37 proves Android 17 behavior while minSdk 26 preserves the
+    // compatibility floor tested by the same APK in CI.
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "org.scenelith.orkela"
         minSdk = 26
-        targetSdk = 36
-        versionCode = 30003
-        versionName = "0.3.0-alpha.3"
+        targetSdk = 37
+        versionCode = 30006
+        versionName = "0.3.0-alpha.6"
+        testInstrumentationRunner =
+            "org.scenelith.orkela.NativeDecodeInstrumentation"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
