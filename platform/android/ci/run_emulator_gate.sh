@@ -138,7 +138,20 @@ jq -e \
     and .pcm16_sha256 == $expected
   ' "$evidence/orkela-ci-smoke.json"
 
-adb logcat -c
+# API 26 logd can reject `logcat -c` even on an emulator. Keep the existing
+# ring buffer and establish monotonic baselines instead: the UI gate must add a
+# new AudioTrack write and must not add a new fatal/playback error.
+adb logcat -d > "$evidence/logs/logcat-before-play.txt"
+baseline_queue_writes="$(
+  grep -Fc "ORKELA_AUDIO_QUEUE_WRITE accepted_elements=" \
+    "$evidence/logs/logcat-before-play.txt" \
+    || true
+)"
+baseline_playback_errors="$(
+  grep -Ec "FATAL EXCEPTION|Playback failed:" \
+    "$evidence/logs/logcat-before-play.txt" \
+    || true
+)"
 adb shell am force-stop org.scenelith.orkela
 adb shell am start -W \
   -n org.scenelith.orkela/.MainActivity \
@@ -186,8 +199,12 @@ adb shell input tap "$play_x" "$play_y"
 queue_write_seen=0
 for _ in $(seq 1 20); do
   adb logcat -d > "$evidence/logs/logcat.txt"
-  if grep -Eq "FATAL EXCEPTION|Playback failed:" \
-      "$evidence/logs/logcat.txt"; then
+  current_playback_errors="$(
+    grep -Ec "FATAL EXCEPTION|Playback failed:" \
+      "$evidence/logs/logcat.txt" \
+      || true
+  )"
+  if ((current_playback_errors > baseline_playback_errors)); then
     echo "play_control_diagnostic=process-crash-observed" \
       > "$evidence/PLAY-CONTROL-DIAGNOSTIC.txt"
     exit 1
@@ -202,8 +219,12 @@ for _ in $(seq 1 20); do
       exit 1
     fi
   fi
-  if grep -Fq "ORKELA_AUDIO_QUEUE_WRITE accepted_elements=" \
-      "$evidence/logs/logcat.txt"; then
+  current_queue_writes="$(
+    grep -Fc "ORKELA_AUDIO_QUEUE_WRITE accepted_elements=" \
+      "$evidence/logs/logcat.txt" \
+      || true
+  )"
+  if ((current_queue_writes > baseline_queue_writes)); then
     queue_write_seen=1
     break
   fi
