@@ -9,6 +9,7 @@ set -euo pipefail
 gate="${1:?usage: run_emulator_gate.sh <26|37|37-16k> [runtime|boot] [attempt]}"
 gate_mode="${2:-runtime}"
 gate_attempt="${3:-1}"
+android17_feature_tuple="GLDirectMem,HasSharedSlotsHostMemoryAllocator,-Vulkan,-VulkanNativeSwapchain,-GuestAngle"
 if [[ "$gate_mode" != "runtime" && "$gate_mode" != "boot" ]]; then
   echo "Unsupported Android gate mode: $gate_mode" >&2
   exit 2
@@ -210,11 +211,12 @@ timeout --signal=TERM --kill-after=5s 20s \
 timeout --signal=TERM --kill-after=5s 30s adb start-server
 gpu_mode="software"
 if [[ "$runtime_api" -eq 37 ]]; then
-  # The exact same-host causal A/B gate proved that Emulator 37.2.1 can retain
-  # Vulkan composition while disabling GuestAngle, which otherwise crashed the
-  # Android 17 guest compositor. The guest payload, SELinux mode, and luma
-  # policy remain unchanged; the boot-selected host/guest graphics route does
-  # not, so it is recorded as an explicit correction rather than "stock".
+  # Emulator 37.2.1 parses the official "37.0" image metadata as host API 3.
+  # Its normal API >= 30 policy therefore disables GLDirectMem and shared host
+  # slots even though Android 17's GoldfishMapper requires the resulting
+  # ReadColorBufferDMA capability for RegionSampling. Restore exactly those
+  # host capabilities, keep GLDMA enabled, and disable the conflicting
+  # Vulkan/VNS/GuestAngle route. Guest bytes, SELinux, and luma stay untouched.
   gpu_mode="swiftshader"
 fi
 emulator_args=(
@@ -236,7 +238,7 @@ emulator_args=(
 if [[ "$runtime_api" -eq 37 ]]; then
   emulator_args+=(
     -feature
-    "Vulkan,VulkanNativeSwapchain,-GuestAngle"
+    "$android17_feature_tuple"
   )
 fi
 printf '%s\n' "$emulator_bin" "${emulator_args[@]}" \
@@ -286,6 +288,11 @@ runtime_graphics_configuration_stock=true
 effective_vulkan=0
 effective_vulkan_native_swapchain=0
 effective_guest_vulkan_only=0
+effective_gl_direct_mem=0
+effective_has_shared_slots_host_memory_allocator=0
+effective_gl_dma=0
+effective_gl_dma2=0
+host_api_decision_level=0
 vk_emulation_count=0
 compositor_vk_count=0
 healthy_observations=0
@@ -626,8 +633,26 @@ if [[ "$runtime_api" -eq 37 ]]; then
       || true
   )" -eq 1
   test "$(
+    grep -Fxc \
+      "DEBUG   | parseAndApplyOverrides, overrides='$android17_feature_tuple'" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
     grep -Ec \
-      "Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
+      "Feature 'GLDirectMem'.*overridden to 'enabled'" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "Feature 'HasSharedSlotsHostMemoryAllocator'.*overridden to 'enabled'" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "required for VulkanNativeSwapchain|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
       "$evidence/logs/emulator.log" \
       || true
   )" -eq 0
@@ -639,13 +664,13 @@ if [[ "$runtime_api" -eq 37 ]]; then
   )" -eq 0
   test "$(
     grep -Ec \
-      "gfxstreamFeature:Vulkan[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "gfxstreamFeature:Vulkan[[:space:]]*=[[:space:]]*0[[:space:]]*$" \
       "$evidence/logs/emulator.log" \
       || true
   )" -eq 1
   test "$(
     grep -Ec \
-      "gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*0[[:space:]]*$" \
       "$evidence/logs/emulator.log" \
       || true
   )" -eq 1
@@ -655,6 +680,36 @@ if [[ "$runtime_api" -eq 37 ]]; then
       "$evidence/logs/emulator.log" \
       || true
   )" -eq 1
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:GlDirectMem[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:GlDma[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:GlDma2[[:space:]]*=[[:space:]]*0[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  host_api_decision_level="$(
+    sed -n \
+      's/^.*Deciding if GLDirectMem\/Vulkan should be enabled.*API level: \([0-9][0-9]*\).*$/\1/p' \
+      "$evidence/logs/emulator.log"
+  )"
+  test "$host_api_decision_level" = "3"
   effective_renderer_line="$(
     grep -F "setCurrentRenderer:" "$evidence/logs/emulator.log" \
       | sed -E 's/^.*setCurrentRenderer:/setCurrentRenderer:/' \
@@ -663,25 +718,11 @@ if [[ "$runtime_api" -eq 37 ]]; then
   test "$effective_renderer_line" \
     = "setCurrentRenderer: swiftshader swiftshader gles:Swiftshader Indirect vulkan:Swiftshader Indirect"
   test "$(
-    grep -Ec "Initializing VkEmulation features" \
+    grep -Ec \
+      "Initializing VkEmulation features|useVulkanComposition:[[:space:]]*true|useVulkanNativeSwapchain:[[:space:]]*true|Performing composition using CompositorVk" \
       "$evidence/logs/emulator.log" \
       || true
-  )" -eq 1
-  test "$(
-    grep -Ec "useVulkanComposition:[[:space:]]*true" \
-      "$evidence/logs/emulator.log" \
-      || true
-  )" -eq 1
-  test "$(
-    grep -Ec "useVulkanNativeSwapchain:[[:space:]]*true" \
-      "$evidence/logs/emulator.log" \
-      || true
-  )" -eq 1
-  test "$(
-    grep -Ec "Performing composition using CompositorVk" \
-      "$evidence/logs/emulator.log" \
-      || true
-  )" -eq 1
+  )" -eq 0
   test -z "$boot_hardware_egl"
   test "$renderer_egl" = "emulation"
 
@@ -696,20 +737,29 @@ if [[ "$runtime_api" -eq 37 ]]; then
     echo "emulator=$emulator_version"
     echo "gpu_mode=$gpu_mode"
     echo "gles_backend=emulation"
-    echo "vulkan_backend=swiftshader"
-    echo "emulator_feature_overrides=Vulkan,VulkanNativeSwapchain,-GuestAngle"
+    echo "vulkan_backend=disabled"
+    echo "emulator_feature_overrides=$android17_feature_tuple"
+    echo "host_api_decision_level=$host_api_decision_level"
+    echo "effective_gl_direct_mem=1"
+    echo "effective_has_shared_slots_host_memory_allocator=1"
+    echo "effective_gl_dma=1"
+    echo "effective_gl_dma2=0"
     echo "emulator_archive_sha256=${ORKELA_EMULATOR_ARCHIVE_SHA256}"
     echo "guest_luma_sampling=${luma_sampling:-default}"
     echo "surfaceflinger_pid=$surfaceflinger_pid_initial"
   } > "$evidence/EMULATOR-GRAPHICS-CONFIGURATION.txt"
-  emulator_graphics_workaround="vulkan-compositor-with-guest-angle-disabled"
+  emulator_graphics_workaround="android17-read-color-buffer-dma-capability-bridge"
   stock_emulator_graphics_feature_configuration=false
   runtime_graphics_configuration_stock=false
-  effective_vulkan=1
-  effective_vulkan_native_swapchain=1
+  effective_vulkan=0
+  effective_vulkan_native_swapchain=0
   effective_guest_vulkan_only=0
-  vk_emulation_count=1
-  compositor_vk_count=1
+  effective_gl_direct_mem=1
+  effective_has_shared_slots_host_memory_allocator=1
+  effective_gl_dma=1
+  effective_gl_dma2=0
+  vk_emulation_count=0
+  compositor_vk_count=0
   healthy_observations=24
 fi
 
@@ -1137,7 +1187,7 @@ if [[ "$gate_mode" == "boot" ]]; then
     --arg final_surfaceflinger_pid "$soak_surfaceflinger_pid_final" \
     --arg emulator_feature_overrides "$(
       if [[ "$runtime_api" -eq 37 ]]; then
-        printf '%s' 'Vulkan,VulkanNativeSwapchain,-GuestAngle'
+        printf '%s' "$android17_feature_tuple"
       else
         printf '%s' 'none'
       fi
@@ -1174,11 +1224,16 @@ if [[ "$gate_mode" == "boot" ]]; then
       emulator_feature_overrides: $emulator_feature_overrides,
       effective_renderer: $effective_renderer,
       renderer_transport: $renderer_transport,
-      effective_vulkan: 1,
-      effective_vulkan_native_swapchain: 1,
+      effective_vulkan_native_swapchain: 0,
       effective_guest_vulkan_only: 0,
-      vk_emulation_count: 1,
-      compositor_vk_count: 1,
+      effective_gl_direct_mem: 1,
+      effective_has_shared_slots_host_memory_allocator: 1,
+      effective_gl_dma: 1,
+      effective_gl_dma2: 0,
+      host_api_decision_level: 3,
+      effective_vulkan: 0,
+      vk_emulation_count: 0,
+      compositor_vk_count: 0,
       boot_completed: true,
       selinux: $selinux,
       luma_sampling: $luma_sampling,
@@ -1560,7 +1615,7 @@ jq -n \
     "${surfaceflinger_pid_final:-$surfaceflinger_pid_initial}" \
   --arg emulator_feature_overrides "$(
     if [[ "$runtime_api" -eq 37 ]]; then
-      printf '%s' 'Vulkan,VulkanNativeSwapchain,-GuestAngle'
+      printf '%s' "$android17_feature_tuple"
     else
       printf '%s' 'none'
     fi
@@ -1578,6 +1633,12 @@ jq -n \
     "$effective_vulkan_native_swapchain" \
   --argjson effective_guest_vulkan_only \
     "$effective_guest_vulkan_only" \
+  --argjson effective_gl_direct_mem "$effective_gl_direct_mem" \
+  --argjson effective_has_shared_slots_host_memory_allocator \
+    "$effective_has_shared_slots_host_memory_allocator" \
+  --argjson effective_gl_dma "$effective_gl_dma" \
+  --argjson effective_gl_dma2 "$effective_gl_dma2" \
+  --argjson host_api_decision_level "$host_api_decision_level" \
   --argjson vk_emulation_count "$vk_emulation_count" \
   --argjson compositor_vk_count "$compositor_vk_count" \
   --argjson healthy_observations "$healthy_observations" \
@@ -1632,6 +1693,12 @@ jq -n \
     effective_vulkan_native_swapchain:
       $effective_vulkan_native_swapchain,
     effective_guest_vulkan_only: $effective_guest_vulkan_only,
+    effective_gl_direct_mem: $effective_gl_direct_mem,
+    effective_has_shared_slots_host_memory_allocator:
+      $effective_has_shared_slots_host_memory_allocator,
+    effective_gl_dma: $effective_gl_dma,
+    effective_gl_dma2: $effective_gl_dma2,
+    host_api_decision_level: $host_api_decision_level,
     vk_emulation_count: $vk_emulation_count,
     compositor_vk_count: $compositor_vk_count,
     boot_completed: true,

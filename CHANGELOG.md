@@ -13,6 +13,11 @@ Local public-pin evidence:
 
 ### Added
 
+- Fail-closed Android 17 `ReadColorBufferDMA` causal gate. It records the
+  Emulator host's incorrect API-3 decision for the official `android-37.0`
+  image, requires effective `GlDirectMem=1`, shared host slots and `GlDma=1`,
+  disables the contradictory Vulkan/VNS/GuestAngle route, and rejects missing,
+  duplicate, delayed-crash, or dependency-conflict evidence.
 - Strict C++23 `Orkela::Session` with bounded Resonith preflight and an
   allocation-free successful packet-pull path.
 - Native Android application project for ARM64 and x86-64 with direct

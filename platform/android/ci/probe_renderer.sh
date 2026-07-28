@@ -19,6 +19,9 @@ if [[ ! "$cell_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   exit 2
 fi
 feature_profile="${3:-default}"
+requested_gl_direct_mem=-1
+requested_has_shared_slots=-1
+requested_gl_dma=-1
 case "$feature_profile" in
   default)
     requested_vulkan=0
@@ -42,6 +45,24 @@ case "$feature_profile" in
     requested_guest_vulkan_only=0
     requested_feature_overrides="Vulkan,VulkanNativeSwapchain,-GuestAngle"
     ;;
+  read-color-buffer-dma-off)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=0
+    requested_guest_vulkan_only=0
+    requested_gl_direct_mem=0
+    requested_has_shared_slots=0
+    requested_gl_dma=1
+    requested_feature_overrides="-GLDirectMem,-HasSharedSlotsHostMemoryAllocator,-GuestAngle,-Vulkan,-VulkanNativeSwapchain"
+    ;;
+  read-color-buffer-dma-on)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=0
+    requested_guest_vulkan_only=0
+    requested_gl_direct_mem=1
+    requested_has_shared_slots=1
+    requested_gl_dma=1
+    requested_feature_overrides="GLDirectMem,HasSharedSlotsHostMemoryAllocator,-GuestAngle,-Vulkan,-VulkanNativeSwapchain"
+    ;;
   *)
     echo "Unsupported Emulator feature profile: $feature_profile" >&2
     exit 2
@@ -50,7 +71,9 @@ esac
 if [[ "$feature_profile" != \
     "vulkan-native-swapchain-with-vulkan" \
     && "$feature_profile" != \
-      "vulkan-native-swapchain-with-vulkan-guest-angle-off" ]]; then
+      "vulkan-native-swapchain-with-vulkan-guest-angle-off" \
+    && "$feature_profile" != "read-color-buffer-dma-off" \
+    && "$feature_profile" != "read-color-buffer-dma-on" ]]; then
   requested_guest_vulkan_only=-1
 fi
 probe_scope="${4:-soak}"
@@ -113,6 +136,16 @@ effective_feature_count=0
 effective_vulkan_count=0
 effective_vulkan=""
 effective_vulkan_native_swapchain=""
+effective_gl_direct_mem=""
+effective_gl_direct_mem_count=0
+effective_has_shared_slots=""
+effective_has_shared_slots_count=0
+effective_gl_dma=""
+effective_gl_dma_count=0
+effective_gl_dma2=""
+effective_gl_dma2_count=0
+host_api_decision_level=""
+host_api_decision_level_count=0
 feature_exact=false
 process_started=false
 process_alive_after_probe=false
@@ -288,6 +321,9 @@ elif [[ "$feature_profile" == \
     -feature
     Vulkan,VulkanNativeSwapchain,-GuestAngle
   )
+elif [[ "$feature_profile" == "read-color-buffer-dma-off" \
+    || "$feature_profile" == "read-color-buffer-dma-on" ]]; then
+  emulator_args+=(-feature "$requested_feature_overrides")
 fi
 printf '%q ' "$emulator_bin" "${emulator_args[@]}" \
   > "$evidence/EMULATOR-COMMAND.txt"
@@ -723,7 +759,7 @@ if [[ "$effective_renderer_count" -ne 1 ]]; then
   record_failure "effective-renderer-tuple-count:$effective_renderer_count"
 fi
 grep -E \
-  'gfxstreamFeature:(Vulkan|VulkanNativeSwapchain)[[:space:]]*=[[:space:]]*[01][[:space:]]*$' \
+  'gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GlDirectMem|HasSharedSlotsHostMemoryAllocator|GlDma|GlDma2)[[:space:]]*=[[:space:]]*[01][[:space:]]*$' \
   "$evidence/logs/emulator.log" \
   > "$evidence/HOST-FEATURE-STATE.txt" || true
 effective_feature_count="$(
@@ -746,6 +782,54 @@ effective_vulkan_native_swapchain="$(
     's/^.*gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
     "$evidence/HOST-FEATURE-STATE.txt"
 )"
+effective_gl_direct_mem_count="$(
+  grep -Ec 'gfxstreamFeature:GlDirectMem[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_gl_direct_mem="$(
+  sed -n \
+    's/^.*gfxstreamFeature:GlDirectMem[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_has_shared_slots_count="$(
+  grep -Ec \
+    'gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_has_shared_slots="$(
+  sed -n \
+    's/^.*gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_gl_dma_count="$(
+  grep -Ec 'gfxstreamFeature:GlDma[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_gl_dma="$(
+  sed -n \
+    's/^.*gfxstreamFeature:GlDma[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_gl_dma2_count="$(
+  grep -Ec 'gfxstreamFeature:GlDma2[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_gl_dma2="$(
+  sed -n \
+    's/^.*gfxstreamFeature:GlDma2[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+host_api_decision_level="$(
+  sed -n \
+    's/^.*Deciding if GLDirectMem\/Vulkan should be enabled.*API level: \([0-9][0-9]*\).*$/\1/p' \
+    "$evidence/logs/emulator.log"
+)"
+host_api_decision_level_count="$(
+  sed -n \
+    's/^.*Deciding if GLDirectMem\/Vulkan should be enabled.*API level: \([0-9][0-9]*\).*$/\1/p' \
+    "$evidence/logs/emulator.log" \
+    | awk 'NF { count += 1 } END { print count + 0 }'
+)"
 if [[ "$effective_feature_count" -ne 1 ]]; then
   record_failure \
     "vulkan-native-swapchain-state-count:$effective_feature_count"
@@ -761,13 +845,33 @@ elif [[ "$effective_vulkan" != "$requested_vulkan" ]]; then
 else
   feature_exact=true
 fi
+if [[ "$feature_profile" == "read-color-buffer-dma-off" \
+    || "$feature_profile" == "read-color-buffer-dma-on" ]]; then
+  feature_exact=false
+  if [[ "$effective_feature_count" -eq 1 \
+      && "$effective_vulkan_count" -eq 1 \
+      && "$effective_vulkan" == "$requested_vulkan" \
+      && "$effective_vulkan_native_swapchain" \
+        == "$requested_vulkan_native_swapchain" \
+      && "$effective_gl_direct_mem_count" -eq 1 \
+      && "$effective_gl_direct_mem" == "$requested_gl_direct_mem" \
+      && "$effective_has_shared_slots_count" -eq 1 \
+      && "$effective_has_shared_slots" == "$requested_has_shared_slots" \
+      && "$effective_gl_dma_count" -eq 1 \
+      && "$effective_gl_dma" == "$requested_gl_dma" \
+      && "$effective_gl_dma2_count" -eq 1 \
+      && "$host_api_decision_level_count" -eq 1 \
+      && "$host_api_decision_level" == "3" ]]; then
+    feature_exact=true
+  fi
+fi
 
 # Preserve a deterministic account of failures that happen before ADB. These
 # cells are valid negative evidence only when both the process state and the
 # normalized host failure signature are present.
 startup_evidence_file="$evidence/STARTUP-FAILURE-EVIDENCE.txt"
 grep -E \
-  "parseAndApplyOverrides, overrides=|Feature 'GuestAngle'.*overridden to '(enabled|disabled)'|Auto-enabled GuestAngle feature for VulkanNativeSwapchain|gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GuestVulkanOnly)[[:space:]]*=|Initializing VkEmulation features|useVulkanComposition:[[:space:]]*(true|false)|useVulkanNativeSwapchain:[[:space:]]*(true|false)|Performing composition using CompositorVk|Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
+  "parseAndApplyOverrides, overrides=|Feature '(GuestAngle|GLDirectMem|HasSharedSlotsHostMemoryAllocator)'.*overridden to '(enabled|disabled)'|Auto-enabled GuestAngle feature for VulkanNativeSwapchain|gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GuestVulkanOnly|GlDirectMem|HasSharedSlotsHostMemoryAllocator|GlDma|GlDma2)[[:space:]]*=|Deciding if GLDirectMem/Vulkan should be enabled|Initializing VkEmulation features|useVulkanComposition:[[:space:]]*(true|false)|useVulkanNativeSwapchain:[[:space:]]*(true|false)|Performing composition using CompositorVk|Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
   "$evidence/logs/emulator.log" \
   | sed -E 's/^[^|]*\|[[:space:]]*//' \
   > "$startup_evidence_file" || true
@@ -929,10 +1033,23 @@ REQUESTED_FEATURE_OVERRIDES="$requested_feature_overrides" \
 REQUESTED_VULKAN="$requested_vulkan" \
 REQUESTED_VULKAN_NATIVE_SWAPCHAIN="$requested_vulkan_native_swapchain" \
 REQUESTED_GUEST_VULKAN_ONLY="$requested_guest_vulkan_only" \
+REQUESTED_GL_DIRECT_MEM="$requested_gl_direct_mem" \
+REQUESTED_HAS_SHARED_SLOTS="$requested_has_shared_slots" \
+REQUESTED_GL_DMA="$requested_gl_dma" \
 EFFECTIVE_VULKAN="$effective_vulkan" \
 EFFECTIVE_VULKAN_COUNT="$effective_vulkan_count" \
 EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN="$effective_vulkan_native_swapchain" \
 EFFECTIVE_FEATURE_COUNT="$effective_feature_count" \
+EFFECTIVE_GL_DIRECT_MEM="$effective_gl_direct_mem" \
+EFFECTIVE_GL_DIRECT_MEM_COUNT="$effective_gl_direct_mem_count" \
+EFFECTIVE_HAS_SHARED_SLOTS="$effective_has_shared_slots" \
+EFFECTIVE_HAS_SHARED_SLOTS_COUNT="$effective_has_shared_slots_count" \
+EFFECTIVE_GL_DMA="$effective_gl_dma" \
+EFFECTIVE_GL_DMA_COUNT="$effective_gl_dma_count" \
+EFFECTIVE_GL_DMA2="$effective_gl_dma2" \
+EFFECTIVE_GL_DMA2_COUNT="$effective_gl_dma2_count" \
+HOST_API_DECISION_LEVEL="$host_api_decision_level" \
+HOST_API_DECISION_LEVEL_COUNT="$host_api_decision_level_count" \
 FEATURE_EXACT="$feature_exact" \
 PROCESS_STARTED="$process_started" \
 PROCESS_ALIVE_AFTER_PROBE="$process_alive_after_probe" \
@@ -1069,6 +1186,44 @@ print(json.dumps({
         ),
         "effective_state_count": int(
             os.environ["EFFECTIVE_FEATURE_COUNT"]
+        ),
+        "requested_gl_direct_mem": int(
+            os.environ["REQUESTED_GL_DIRECT_MEM"]
+        ),
+        "effective_gl_direct_mem": int(
+            os.environ["EFFECTIVE_GL_DIRECT_MEM"] or -1
+        ),
+        "effective_gl_direct_mem_state_count": int(
+            os.environ["EFFECTIVE_GL_DIRECT_MEM_COUNT"]
+        ),
+        "requested_has_shared_slots_host_memory_allocator": int(
+            os.environ["REQUESTED_HAS_SHARED_SLOTS"]
+        ),
+        "effective_has_shared_slots_host_memory_allocator": int(
+            os.environ["EFFECTIVE_HAS_SHARED_SLOTS"] or -1
+        ),
+        "effective_has_shared_slots_state_count": int(
+            os.environ["EFFECTIVE_HAS_SHARED_SLOTS_COUNT"]
+        ),
+        "requested_gl_dma": int(os.environ["REQUESTED_GL_DMA"]),
+        "effective_gl_dma": int(os.environ["EFFECTIVE_GL_DMA"] or -1),
+        "effective_gl_dma_state_count": int(
+            os.environ["EFFECTIVE_GL_DMA_COUNT"]
+        ),
+        "effective_gl_dma2": int(os.environ["EFFECTIVE_GL_DMA2"] or -1),
+        "effective_gl_dma2_state_count": int(
+            os.environ["EFFECTIVE_GL_DMA2_COUNT"]
+        ),
+        "host_api_decision_level": int(
+            os.environ["HOST_API_DECISION_LEVEL"] or -1
+        ),
+        "host_api_decision_level_count": int(
+            os.environ["HOST_API_DECISION_LEVEL_COUNT"]
+        ),
+        "read_color_buffer_dma_proxy": (
+            os.environ["EFFECTIVE_GL_DIRECT_MEM"] == "1"
+            and os.environ["EFFECTIVE_HAS_SHARED_SLOTS"] == "1"
+            and os.environ["EFFECTIVE_GL_DMA"] == "1"
         ),
         "exact": boolean("FEATURE_EXACT"),
     },

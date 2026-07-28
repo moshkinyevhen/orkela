@@ -20,7 +20,10 @@ from typing import Any
 
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-FEATURE_TUPLE = "Vulkan,VulkanNativeSwapchain,-GuestAngle"
+FEATURE_TUPLE = (
+    "GLDirectMem,HasSharedSlotsHostMemoryAllocator,"
+    "-Vulkan,-VulkanNativeSwapchain,-GuestAngle"
+)
 RENDERER_TUPLE = (
     "setCurrentRenderer: swiftshader swiftshader "
     "gles:Swiftshader Indirect vulkan:Swiftshader Indirect"
@@ -44,6 +47,23 @@ EXPECTED_EMULATOR = {
         "1ad0f317eb6522441460001ff660d3d7d"
     ),
     "emulator_archive_size": 346539649,
+}
+EXPECTED_GRAPHICS_CORRECTION = {
+    "requested_feature_overrides": FEATURE_TUPLE,
+    "expected_effective": {
+        "GlDirectMem": 1,
+        "HasSharedSlotsHostMemoryAllocator": 1,
+        "GlDma": 1,
+        "GlDma2": 0,
+        "Vulkan": 0,
+        "VulkanNativeSwapchain": 0,
+        "GuestVulkanOnly": 0,
+    },
+    "host_parsed_api_level": 3,
+    "read_color_buffer_dma_proxy": (
+        "GlDirectMem && HasSharedSlotsHostMemoryAllocator && GlDma"
+    ),
+    "guest_payload_unmodified": True,
 }
 EXPECTED_PROFILES = {
     "37": {
@@ -134,6 +154,12 @@ def validate_contract(contract: dict[str, Any]) -> None:
         contract,
         "emulator",
         EXPECTED_EMULATOR,
+        "promotion contract",
+    )
+    require_equal(
+        contract,
+        "graphics_correction",
+        EXPECTED_GRAPHICS_CORRECTION,
         "promotion contract",
     )
     profiles = contract.get("profiles")
@@ -431,19 +457,37 @@ def validate_emulator_log(root: Path) -> None:
     )
     require_regex_count(
         text,
+        rf"parseAndApplyOverrides, overrides='{re.escape(FEATURE_TUPLE)}'",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
+        r"Feature 'GLDirectMem'.*overridden to 'enabled'",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
+        r"Feature 'HasSharedSlotsHostMemoryAllocator'.*overridden to 'enabled'",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
         r"Feature 'GuestAngle'.*overridden to 'disabled'",
         1,
         str(path),
     )
     require_regex_count(
         text,
-        r"gfxstreamFeature:Vulkan\s*=\s*1\s*$",
+        r"gfxstreamFeature:Vulkan\s*=\s*0\s*$",
         1,
         str(path),
     )
     require_regex_count(
         text,
-        r"gfxstreamFeature:VulkanNativeSwapchain\s*=\s*1\s*$",
+        r"gfxstreamFeature:VulkanNativeSwapchain\s*=\s*0\s*$",
         1,
         str(path),
     )
@@ -455,46 +499,66 @@ def validate_emulator_log(root: Path) -> None:
     )
     require_regex_count(
         text,
+        r"gfxstreamFeature:HasSharedSlotsHostMemoryAllocator\s*=\s*1\s*$",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
+        r"gfxstreamFeature:GlDma\s*=\s*1\s*$",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
+        r"gfxstreamFeature:GlDma2\s*=\s*0\s*$",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
+        r"gfxstreamFeature:GlDirectMem\s*=\s*1\s*$",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
+        r"Deciding if GLDirectMem/Vulkan should be enabled.*API level: 3 ",
+        1,
+        str(path),
+    )
+    require_regex_count(
+        text,
         re.escape(RENDERER_TUPLE),
-        1,
-        str(path),
-    )
-    require_regex_count(text, r"Initializing VkEmulation features", 1, str(path))
-    require_regex_count(
-        text,
-        r"useVulkanComposition:\s*true",
-        1,
-        str(path),
-    )
-    require_regex_count(
-        text,
-        r"useVulkanNativeSwapchain:\s*true",
-        1,
-        str(path),
-    )
-    require_regex_count(
-        text,
-        r"Performing composition using CompositorVk",
         1,
         str(path),
     )
     forbidden = (
         r"Auto-enabled GuestAngle feature for VulkanNativeSwapchain|"
+        r"required for VulkanNativeSwapchain|"
+        r"Initializing VkEmulation features|"
+        r"useVulkanComposition:\s*true|"
+        r"useVulkanNativeSwapchain:\s*true|"
+        r"Performing composition using CompositorVk|"
         r"Failed to initialize the compositor|"
         r"Failed to initialize FrameBuffer|"
         r"Could not start renderer"
     )
     require_regex_count(text, forbidden, 0, str(path))
     ordered_markers = (
+        f"parseAndApplyOverrides, overrides='{FEATURE_TUPLE}'",
+        "Feature 'GLDirectMem'",
+        "Feature 'HasSharedSlotsHostMemoryAllocator'",
         "Feature 'GuestAngle'",
+        "API level: 3 ",
         RENDERER_TUPLE,
-        "gfxstreamFeature:Vulkan = 1",
-        "gfxstreamFeature:VulkanNativeSwapchain = 1",
+        "gfxstreamFeature:Vulkan = 0",
+        "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 1",
+        "gfxstreamFeature:VulkanNativeSwapchain = 0",
         "gfxstreamFeature:GuestVulkanOnly = 0",
-        "Initializing VkEmulation features",
-        "useVulkanComposition: true",
-        "useVulkanNativeSwapchain: true",
-        "Performing composition using CompositorVk",
+        "gfxstreamFeature:GlDma = 1",
+        "gfxstreamFeature:GlDma2 = 0",
+        "gfxstreamFeature:GlDirectMem = 1",
     )
     positions = [text.find(marker) for marker in ordered_markers]
     if any(position < 0 for position in positions):
@@ -701,8 +765,13 @@ def validate_raw_runtime_identity(
         "emulator": record["emulator_version"],
         "gpu_mode": "swiftshader",
         "gles_backend": "emulation",
-        "vulkan_backend": "swiftshader",
+        "vulkan_backend": "disabled",
         "emulator_feature_overrides": FEATURE_TUPLE,
+        "host_api_decision_level": "3",
+        "effective_gl_direct_mem": "1",
+        "effective_has_shared_slots_host_memory_allocator": "1",
+        "effective_gl_dma": "1",
+        "effective_gl_dma2": "0",
         "emulator_archive_sha256": record["emulator_archive_sha256"],
         "guest_luma_sampling": record["luma_sampling"],
         "surfaceflinger_pid": record["initial_surfaceflinger_pid"],
@@ -978,11 +1047,21 @@ def validate_common(
         or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", renderer_transport) is None
     ):
         fail(f"{scope}: renderer transport is absent or malformed")
-    require_equal(record, "effective_vulkan", 1, scope)
-    require_equal(record, "effective_vulkan_native_swapchain", 1, scope)
+    require_equal(record, "effective_vulkan", 0, scope)
+    require_equal(record, "effective_vulkan_native_swapchain", 0, scope)
     require_equal(record, "effective_guest_vulkan_only", 0, scope)
-    require_equal(record, "vk_emulation_count", 1, scope)
-    require_equal(record, "compositor_vk_count", 1, scope)
+    require_equal(record, "effective_gl_direct_mem", 1, scope)
+    require_equal(
+        record,
+        "effective_has_shared_slots_host_memory_allocator",
+        1,
+        scope,
+    )
+    require_equal(record, "effective_gl_dma", 1, scope)
+    require_equal(record, "effective_gl_dma2", 0, scope)
+    require_equal(record, "host_api_decision_level", 3, scope)
+    require_equal(record, "vk_emulation_count", 0, scope)
+    require_equal(record, "compositor_vk_count", 0, scope)
     require_equal(record, "selinux", "Enforcing", scope)
     if record.get("luma_sampling") not in ("default", "1"):
         fail(f"{scope}: luma sampling is not default/enabled")

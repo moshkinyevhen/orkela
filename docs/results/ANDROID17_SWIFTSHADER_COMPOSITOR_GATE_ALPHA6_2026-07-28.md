@@ -372,3 +372,57 @@ Orkela `0.3.0-alpha.6` remains blocked until the same immutable APK pair passes
 API 26, Android 17/4-KiB, and Android 17/16-KiB runtime gates. Neither the local
 Windows result nor an isolated renderer candidate is sufficient for release
 promotion.
+
+## Exact-APK attempt and corrected root cause
+
+[GitHub run 30396131139](https://github.com/moshkinyevhen/orkela/actions/runs/30396131139)
+invalidated the earlier GuestAngle-only correction before release. The API 26
+application gate passed, but the first Android 17 4-KiB cold boot entered a
+repeatable SurfaceFlinger `RegionSampling` abort loop. The complete tombstone
+ended in `GoldfishMapper::readFromHost` with:
+
+```text
+Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma
+```
+
+The assertion means that `hasReadColorBufferDma` was false, not that DMA was
+enabled incorrectly. Android 17's Goldfish mapper then has no non-DMA fallback.
+The matching Android 17 gfxstream host advertises this capability only when
+both `GlDirectMem` and `HasSharedSlotsHostMemoryAllocator` are enabled.
+
+The pinned Emulator log proved the exact mismatch:
+
+```text
+API level: 3
+gfxstreamFeature:GlDma = 1
+gfxstreamFeature:GlDirectMem = 0
+gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 0
+```
+
+The official image metadata is `AndroidVersion.ApiLevel=37.0`, while the
+pinned host interpreted it as API 3 and consequently disabled API-gated memory
+features. Disabling GLDMA would invert the source requirement and is explicitly
+forbidden.
+
+The next evidence profile therefore keeps guest bytes and GLDMA unchanged and
+requests:
+
+```text
+-gpu swiftshader
+-feature GLDirectMem,HasSharedSlotsHostMemoryAllocator,-GuestAngle,-Vulkan,-VulkanNativeSwapchain
+```
+
+Before promotion, a same-host causal A/B must reproduce the RegionSampling
+failure with both prerequisites disabled and eliminate it with both enabled.
+The positive cell must survive 24 observations over 120 seconds with one
+SurfaceFlinger PID, four valid screenshots, stock luma, enforcing SELinux, and
+zero crash signatures. The full 3+3 cold-boot and exact-APK gates remain
+mandatory afterward. The host-parsed API level is now a contracted coordinate;
+the API-3 parser defect remains a separate compatibility audit rather than
+being hidden by a green boot.
+
+Primary source basis:
+
+- [Android 17 Goldfish mapper](https://android.googlesource.com/device/generic/goldfish/+/refs/tags/android-17.0.0_r1/hals/gralloc/mapper.cpp)
+- [Android 17 gfxstream render-control capability](https://android.googlesource.com/platform/hardware/google/gfxstream/+/refs/tags/android-17.0.0_r1/host/render_control.cpp)
+- [AEMU API-gated graphics selection](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android-qemu2-glue/main.cpp)

@@ -205,11 +205,16 @@ class Android17PromotionReducerTest(unittest.TestCase):
             "emulator_feature_overrides": REDUCER.FEATURE_TUPLE,
             "effective_renderer": REDUCER.RENDERER_TUPLE,
             "renderer_transport": "virtio-gpu-pipe",
-            "effective_vulkan": 1,
-            "effective_vulkan_native_swapchain": 1,
+            "effective_vulkan": 0,
+            "effective_vulkan_native_swapchain": 0,
             "effective_guest_vulkan_only": 0,
-            "vk_emulation_count": 1,
-            "compositor_vk_count": 1,
+            "effective_gl_direct_mem": 1,
+            "effective_has_shared_slots_host_memory_allocator": 1,
+            "effective_gl_dma": 1,
+            "effective_gl_dma2": 0,
+            "host_api_decision_level": 3,
+            "vk_emulation_count": 0,
+            "compositor_vk_count": 0,
             "boot_completed": True,
             "selinux": "Enforcing",
             "luma_sampling": "default",
@@ -248,15 +253,30 @@ class Android17PromotionReducerTest(unittest.TestCase):
         (logs / "emulator.log").write_text(
             "\n".join([
                 "Android emulator version 37.2.1.0",
+                (
+                    "parseAndApplyOverrides, overrides='"
+                    f"{REDUCER.FEATURE_TUPLE}'"
+                ),
+                "Feature 'GLDirectMem' overridden to 'enabled'",
+                (
+                    "Feature 'HasSharedSlotsHostMemoryAllocator' "
+                    "overridden to 'enabled'"
+                ),
                 "Feature 'GuestAngle' overridden to 'disabled'",
+                (
+                    "Deciding if GLDirectMem/Vulkan should be enabled. "
+                    "Selected GLES renderer: Swiftshader Indirect "
+                    "Selected Vulkan renderer: Swiftshader Indirect "
+                    "API level: 3 "
+                ),
                 REDUCER.RENDERER_TUPLE,
-                "gfxstreamFeature:Vulkan = 1",
-                "gfxstreamFeature:VulkanNativeSwapchain = 1",
+                "gfxstreamFeature:Vulkan = 0",
+                "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 1",
+                "gfxstreamFeature:VulkanNativeSwapchain = 0",
                 "gfxstreamFeature:GuestVulkanOnly = 0",
-                "Initializing VkEmulation features",
-                "useVulkanComposition: true",
-                "useVulkanNativeSwapchain: true",
-                "Performing composition using CompositorVk",
+                "gfxstreamFeature:GlDma = 1",
+                "gfxstreamFeature:GlDma2 = 0",
+                "gfxstreamFeature:GlDirectMem = 1",
             ]) + "\n",
             encoding="utf-8",
         )
@@ -375,8 +395,13 @@ class Android17PromotionReducerTest(unittest.TestCase):
                 "emulator=37.2.1.0",
                 "gpu_mode=swiftshader",
                 "gles_backend=emulation",
-                "vulkan_backend=swiftshader",
+                "vulkan_backend=disabled",
                 f"emulator_feature_overrides={REDUCER.FEATURE_TUPLE}",
+                "host_api_decision_level=3",
+                "effective_gl_direct_mem=1",
+                "effective_has_shared_slots_host_memory_allocator=1",
+                "effective_gl_dma=1",
+                "effective_gl_dma2=0",
                 f"emulator_archive_sha256={'2' * 64}",
                 "guest_luma_sampling=default",
                 "surfaceflinger_pid=100",
@@ -425,12 +450,54 @@ class Android17PromotionReducerTest(unittest.TestCase):
         with self.assertRaises(REDUCER.GateError):
             self.validate()
 
+    def test_missing_read_color_buffer_dma_prerequisite_fails(self):
+        self.record["effective_gl_direct_mem"] = 0
+        with self.assertRaises(REDUCER.GateError):
+            self.validate()
+
+    def test_disabled_gl_dma_fails(self):
+        self.record["effective_gl_dma"] = 0
+        with self.assertRaises(REDUCER.GateError):
+            self.validate()
+
+    def test_wrong_host_api_decision_level_fails(self):
+        self.record["host_api_decision_level"] = 37
+        with self.assertRaises(REDUCER.GateError):
+            self.validate()
+
     def test_raw_feature_fallback_fails(self):
         path = self.root / "logs" / "emulator.log"
         path.write_text(
             path.read_text(encoding="utf-8").replace(
                 "gfxstreamFeature:GuestVulkanOnly = 0",
                 "gfxstreamFeature:GuestVulkanOnly = 1",
+            ),
+            encoding="utf-8",
+        )
+        self.refresh_raw_manifest()
+        with self.assertRaises(REDUCER.GateError):
+            self.validate()
+
+    def test_raw_missing_shared_slots_fails(self):
+        path = self.root / "logs" / "emulator.log"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 1",
+                "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 0",
+            ),
+            encoding="utf-8",
+        )
+        self.refresh_raw_manifest()
+        with self.assertRaises(REDUCER.GateError):
+            self.validate()
+
+    def test_vns_guest_angle_dependency_error_fails(self):
+        path = self.root / "logs" / "emulator.log"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + (
+                "GuestAngle feature is required for VulkanNativeSwapchain, "
+                "but disabled by the user.\n"
             ),
             encoding="utf-8",
         )
@@ -515,6 +582,7 @@ class Android17PromotionReducerTest(unittest.TestCase):
             "schema": 1,
             "baseline_evidence": REDUCER.EXPECTED_BASELINE,
             "emulator": REDUCER.EXPECTED_EMULATOR,
+            "graphics_correction": REDUCER.EXPECTED_GRAPHICS_CORRECTION,
             "profiles": profiles,
         }
 

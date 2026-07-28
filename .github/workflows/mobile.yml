@@ -23,7 +23,7 @@ on:
         default: false
         type: boolean
       vulkan_backend_probe:
-        description: Run only the Android 17 explicit Vulkan backend probe
+        description: Run only the Android 17 ReadColorBufferDMA causal A/B
         required: false
         default: false
         type: boolean
@@ -411,7 +411,7 @@ jobs:
             echo "- Product service digest: \`${{ steps.upload-android-product.outputs.artifact-digest }}\`"
             echo "- Diagnostics artifact ID: ${{ steps.upload-android-diagnostics.outputs.artifact-id }}"
             echo "- Runtime claim: the same APK/certificate pair passed API 26 and two fresh API 37 exact-APK boots after 3+3 cold boots of byte-verified 4 KiB/16 KiB guest payloads"
-            echo "- Android 17 graphics route: Vulkan + VulkanNativeSwapchain with GuestAngle disabled; the guest image bytes are unchanged, but this is not a stock feature configuration"
+            echo "- Android 17 graphics route: SwiftShader GL with GLDirectMem + shared host slots restored, GLDMA retained, and Vulkan/VNS/GuestAngle disabled; guest bytes are unchanged"
             echo "- Play-control evidence requires AudioTrack queue acceptance; it never claims audibility"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -970,7 +970,7 @@ jobs:
           retention-days: 14
 
   android-vulkan-backend-probe:
-    name: Android 17 Vulkan backend / same-host GuestAngle A/B
+    name: Android 17 ReadColorBufferDMA / same-host causal A/B
     if: >-
       github.event_name == 'workflow_dispatch'
       && inputs.vulkan_backend_probe == true
@@ -997,7 +997,7 @@ jobs:
           python3 -m py_compile \
             platform/android/ci/analyze_guest_boot_evidence.py \
             platform/android/ci/reduce_emulator_probe.py \
-            platform/android/ci/assess_vulkan_backend_probe.py
+            platform/android/ci/assess_read_color_buffer_dma_probe.py
 
       - name: Install exact Android 17 guest and Emulator 37.2.1
         shell: bash
@@ -1010,49 +1010,46 @@ jobs:
             346539649 \
             37.2.1.0
 
-      - name: Probe baseline then GuestAngle-off on the same runner
+      - name: Probe missing then restored DMA prerequisites on one runner
         shell: bash
         run: |
           set -euo pipefail
           bash platform/android/ci/probe_renderer.sh \
             swiftshader \
-            diagnostic-37_2_1-swiftshader-vulkan-vns \
-            vulkan-native-swapchain-with-vulkan \
-            startup
+            control-37_2_1-read-color-buffer-dma-off \
+            read-color-buffer-dma-off \
+            soak
           bash platform/android/ci/probe_renderer.sh \
             swiftshader \
-            diagnostic-37_2_1-swiftshader-vulkan-vns-guest-angle-off \
-            vulkan-native-swapchain-with-vulkan-guest-angle-off \
-            startup
+            candidate-37_2_1-read-color-buffer-dma-on \
+            read-color-buffer-dma-on \
+            soak
 
       - name: Assess exact same-host intervention
         shell: bash
         run: |
           set -euo pipefail
-          python3 platform/android/ci/assess_vulkan_backend_probe.py \
-            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns/PROBE-RESULT.json \
-            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns-guest-angle-off/PROBE-RESULT.json \
-            ANDROID17-VULKAN-BACKEND-JOINT-ASSESSMENT.json
+          python3 platform/android/ci/assess_read_color_buffer_dma_probe.py \
+            build/android37-renderer-probe/control-37_2_1-read-color-buffer-dma-off/PROBE-RESULT.json \
+            build/android37-renderer-probe/candidate-37_2_1-read-color-buffer-dma-on/PROBE-RESULT.json \
+            ANDROID17-READ-COLOR-BUFFER-DMA-ASSESSMENT.json
 
       - name: Summarize exact backend result
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          assessment="ANDROID17-VULKAN-BACKEND-JOINT-ASSESSMENT.json"
+          assessment="ANDROID17-READ-COLOR-BUFFER-DMA-ASSESSMENT.json"
           if [[ -s "$assessment" ]]; then
             {
-              echo "## Android 17 same-host GuestAngle intervention"
+              echo "## Android 17 ReadColorBufferDMA causal A/B"
               echo "- Status: $(jq -r .status "$assessment")"
               echo "- Same host identity: $(jq -r .same_host_identity "$assessment")"
-              echo "- Isolated probe instances: $(jq -r .isolated_probe_instances "$assessment")"
-              echo "- One coordinate exact: $(jq -r .one_coordinate_intervention_exact "$assessment")"
               echo "- Promotion eligible: $(jq -r .promotion_eligible "$assessment")"
-              echo "- Baseline status: $(jq -r .baseline.status "$assessment")"
-              echo "- Candidate status: $(jq -r .candidate.status "$assessment")"
-              echo "- Baseline abort loop: $(jq -r .baseline.target_guest_abort_loop_recomputed "$assessment")"
-              echo "- Candidate boot completed: $(jq -r .candidate.backend_markers.boot_completed "$assessment")"
-              echo "- Candidate guest clean: $(jq -r .candidate.clean_guest_boot_recomputed "$assessment")"
+              echo "- Control target crashes: $(jq -r .control.target_crash_signatures "$assessment")"
+              echo "- Candidate healthy observations: $(jq -r .candidate.healthy_observations "$assessment") / 24"
+              echo "- Candidate target crashes: $(jq -r .candidate.target_crash_signatures "$assessment")"
+              echo "- Host-parsed API level: $(jq -r .host_api_decision_level "$assessment")"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No provenance-valid backend assessment was produced." \
@@ -1063,11 +1060,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Orkela-Android17-vulkan-backend-same-host-ab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Orkela-Android17-read-color-buffer-dma-ab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns
-            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns-guest-angle-off
-            ANDROID17-VULKAN-BACKEND-JOINT-ASSESSMENT.json
+            build/android37-renderer-probe/control-37_2_1-read-color-buffer-dma-off
+            build/android37-renderer-probe/candidate-37_2_1-read-color-buffer-dma-on
+            ANDROID17-READ-COLOR-BUFFER-DMA-ASSESSMENT.json
           if-no-files-found: error
           retention-days: 14
 

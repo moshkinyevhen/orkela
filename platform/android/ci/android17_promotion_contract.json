@@ -14,6 +14,21 @@
     "emulator_archive_sha256": "3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d",
     "emulator_archive_size": 346539649
   },
+  "graphics_correction": {
+    "requested_feature_overrides": "GLDirectMem,HasSharedSlotsHostMemoryAllocator,-Vulkan,-VulkanNativeSwapchain,-GuestAngle",
+    "expected_effective": {
+      "GlDirectMem": 1,
+      "HasSharedSlotsHostMemoryAllocator": 1,
+      "GlDma": 1,
+      "GlDma2": 0,
+      "Vulkan": 0,
+      "VulkanNativeSwapchain": 0,
+      "GuestVulkanOnly": 0
+    },
+    "host_parsed_api_level": 3,
+    "read_color_buffer_dma_proxy": "GlDirectMem && HasSharedSlotsHostMemoryAllocator && GlDma",
+    "guest_payload_unmodified": true
+  },
   "profiles": {
     "37": {
       "page_size": 4096,

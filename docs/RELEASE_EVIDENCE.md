@@ -47,7 +47,13 @@ The report records input filenames, complete sizes, and SHA-256 hashes.
     observations in a measured 120-second compositor soak, add no
     mapper/RegionSampling crash signature, and produce four dimensioned,
     visually non-uniform PNGs whose complete chunk chains and CRCs validate
-    before the application gate begins.
+    before the application gate begins. For pinned Emulator 37.2.1, the gate
+    must record the host's singular API-level decision and the exact effective
+    `GlDirectMem`, `HasSharedSlotsHostMemoryAllocator`, `GlDma`, `GlDma2`,
+    Vulkan, VNS, and GuestVulkanOnly states. Promotion requires a preceding
+    same-host causal A/B in which disabling both ReadColorBufferDMA
+    prerequisites reproduces the bounded RegionSampling failure and restoring
+    both removes it; this diagnostic result alone is never promotion-eligible.
 12. Build each Windows installer on its native x64 or ARM64 runner. Install
     silently into an isolated current-user location, parse the installed PE
     machine field, compare the installed executable hash with the tested build,
