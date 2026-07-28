@@ -422,6 +422,7 @@ public final class MainActivity extends Activity {
             PremiumViews.IconButton.Icon.PLAY,
             true
         );
+        playButton.setId(R.id.play_button);
         playButton.setContentDescription(text(T_PLAY_ACTION));
         playButton.setOnClickListener(view -> {
             haptic(view);

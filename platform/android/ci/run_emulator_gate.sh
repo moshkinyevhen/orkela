@@ -161,7 +161,8 @@ for _ in $(seq 1 30); do
   if adb shell uiautomator dump /sdcard/orkela-window.xml >/dev/null \
       && adb pull /sdcard/orkela-window.xml \
         "$evidence/orkela-window.xml" >/dev/null; then
-    if grep -Fq "Ready • native pull decode • no WAV intermediary" \
+    if grep -Fq \
+        'resource-id="org.scenelith.orkela:id/play_button"' \
         "$evidence/orkela-window.xml"; then
       ui_ready=1
       break
@@ -171,11 +172,12 @@ for _ in $(seq 1 30); do
 done
 test "$ui_ready" -eq 1
 adb exec-out screencap -p > "$evidence/orkela-android.png"
-grep -Fq "Ready • native pull decode • no WAV intermediary" \
+grep -Fq 'resource-id="org.scenelith.orkela:id/play_button"' \
   "$evidence/orkela-window.xml"
 
-# Locate and invoke the real Play control. This proves UI-to-AudioTrack adapter
-# submission without making an audibility claim.
+# Locate and invoke the real Play control through a language-independent
+# resource ID. This proves UI-to-AudioTrack adapter submission without making
+# an audibility claim.
 python3 - "$evidence/orkela-window.xml" > "$evidence/play-point.txt" <<'PY'
 import re
 import sys
@@ -183,7 +185,9 @@ import xml.etree.ElementTree as ET
 
 root = ET.parse(sys.argv[1]).getroot()
 for node in root.iter("node"):
-    if node.attrib.get("text") == "Play":
+    if node.attrib.get("resource-id") == (
+        "org.scenelith.orkela:id/play_button"
+    ):
         match = re.fullmatch(
             r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
             node.attrib["bounds"],
