@@ -54,7 +54,7 @@ jobs:
         && inputs.vulkan_backend_probe != true
       )
     runs-on: ubuntu-24.04
-    timeout-minutes: 110
+    timeout-minutes: 180
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -77,10 +77,12 @@ jobs:
           set -euo pipefail
           ndk="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
           if [[ ! -d "$ndk" ]]; then
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            timeout --signal=TERM --kill-after=15s 1800s \
+              "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
               "ndk;$ANDROID_NDK_VERSION"
           fi
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+          timeout --signal=TERM --kill-after=15s 1800s \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-37.0" \
             "build-tools;37.0.0"
           test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
@@ -93,7 +95,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew \
+          timeout --signal=TERM --kill-after=30s 1800s \
+            ./gradlew \
             :app:assembleDebug \
             :app:assembleDebugAndroidTest \
             --no-daemon \
@@ -123,6 +126,27 @@ jobs:
             | tee "$evidence/APK-SIGNATURE.txt"
           "$apksigner" verify --verbose --print-certs "$test_apk" \
             | tee "$evidence/TEST-APK-SIGNATURE.txt"
+          certificate_digest() {
+            grep -E "certificate SHA-256 digest:" "$1" \
+              | sed -E \
+                  's/^.*certificate SHA-256 digest:[[:space:]]*//' \
+              | tr 'A-F' 'a-f' \
+              | LC_ALL=C sort -u
+          }
+          app_cert_sha256="$(
+            certificate_digest "$evidence/APK-SIGNATURE.txt"
+          )"
+          test_apk_cert_sha256="$(
+            certificate_digest "$evidence/TEST-APK-SIGNATURE.txt"
+          )"
+          test "$(printf '%s\n' "$app_cert_sha256" | wc -l)" -eq 1
+          test "$(printf '%s\n' "$test_apk_cert_sha256" | wc -l)" -eq 1
+          [[ "$app_cert_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$test_apk_cert_sha256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "ORKELA_APP_CERT_SHA256=$app_cert_sha256"
+            echo "ORKELA_TEST_APK_CERT_SHA256=$test_apk_cert_sha256"
+          } >> "$GITHUB_ENV"
 
           aapt="$ANDROID_HOME/build-tools/37.0.0/aapt"
           zipalign="$ANDROID_HOME/build-tools/37.0.0/zipalign"
@@ -196,23 +220,67 @@ jobs:
           test "$actual_stream" = "$EXPECTED_STREAM_SHA256"
           sha256sum "$app" "$test_apk" > "$evidence/APK-SHA256SUMS"
 
-      - name: Enable Android emulator acceleration
+      - name: Validate Android 17 promotion machinery
         shell: bash
-        run: sudo chown "$(id -un)" /dev/kvm
+        run: |
+          set -euo pipefail
+          bash -n platform/android/ci/prepare_android17_promotion.sh
+          bash -n platform/android/ci/run_emulator_gate.sh
+          python3 -m py_compile \
+            platform/android/ci/analyze_guest_boot_evidence.py \
+            platform/android/ci/reduce_android17_promotion.py \
+            platform/android/ci/verify_system_image_manifest.py
+          python3 -m unittest -q \
+            tests/test_analyze_guest_boot_evidence.py \
+            tests/test_reduce_android17_promotion.py \
+            tests/test_verify_system_image_manifest.py
+
+      - name: Prepare byte-verified Android 17 guests and Emulator 37.2.1
+        shell: bash
+        run: bash platform/android/ci/prepare_android17_promotion.sh
 
       - name: Run exact APK gate on Android 8 / API 26
         shell: bash
-        run: bash platform/android/ci/run_emulator_gate.sh 26
+        run: bash platform/android/ci/run_emulator_gate.sh 26 runtime 1
 
-      - name: Run the same exact APK gate on Android 17 / API 37
+      - name: Prove three fresh Android 17 / 4 KiB cold boots
         shell: bash
-        run: bash platform/android/ci/run_emulator_gate.sh 37
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            bash platform/android/ci/run_emulator_gate.sh \
+              37 boot "$attempt"
+          done
 
-      - name: Run the same exact APK on Android 17 with 16 KiB pages
+      - name: Prove three fresh Android 17 / 16 KiB cold boots
         shell: bash
-        run: bash platform/android/ci/run_emulator_gate.sh 37-16k
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            bash platform/android/ci/run_emulator_gate.sh \
+              37-16k boot "$attempt"
+          done
 
-      - name: Prove every boundary gate used the exact same APK pair
+      - name: Reduce the immutable six-cold-boot evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostics="build/mobile-evidence/android/diagnostics"
+          python3 platform/android/ci/reduce_android17_promotion.py \
+            cold \
+            "$diagnostics" \
+            platform/android/ci/android17_promotion_contract.json \
+            "$diagnostics/ANDROID17-COLD-PROMOTION.json"
+
+      - name: Run exact APK gate on a fresh Android 17 / 4 KiB boot
+        shell: bash
+        run: bash platform/android/ci/run_emulator_gate.sh 37 runtime 4
+
+      - name: Run exact APK gate on a fresh Android 17 / 16 KiB boot
+        shell: bash
+        run: bash platform/android/ci/run_emulator_gate.sh 37-16k runtime 4
+
+      - name: Reduce exact APK, certificate, stream, and PCM evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -221,19 +289,27 @@ jobs:
           test_apk="platform/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
           app_sha256="$(sha256sum "$app" | cut -d' ' -f1)"
           test_apk_sha256="$(sha256sum "$test_apk" | cut -d' ' -f1)"
-          for gate in runtime-api26 runtime-api37 runtime-api37-16k; do
-            record="$diagnostics/$gate/RUNTIME-GATE.json"
-            test -s "$record"
-            jq -e \
-              --arg app "$app_sha256" \
-              --arg test_apk "$test_apk_sha256" \
-              '
-                .native_decode == "pass"
-                and .app_sha256 == $app
-                and .test_apk_sha256 == $test_apk
-                and .audibility_claim == false
-              ' "$record"
-          done
+          python3 platform/android/ci/reduce_android17_promotion.py \
+            final \
+            "$diagnostics" \
+            platform/android/ci/android17_promotion_contract.json \
+            "$diagnostics/ANDROID17-EXACT-APK-PROMOTION.json" \
+            --app-sha256 "$app_sha256" \
+            --test-apk-sha256 "$test_apk_sha256" \
+            --app-cert-sha256 "$ORKELA_APP_CERT_SHA256" \
+            --test-apk-cert-sha256 "$ORKELA_TEST_APK_CERT_SHA256" \
+            --source-sha "$GITHUB_SHA" \
+            --stream-sha256 "$EXPECTED_STREAM_SHA256" \
+            --pcm-sha256 "$EXPECTED_PCM_SHA256"
+          jq -e \
+            --arg app "$app_sha256" \
+            --arg test_apk "$test_apk_sha256" \
+            '
+              .native_decode == "pass"
+              and .app_sha256 == $app
+              and .test_apk_sha256 == $test_apk
+              and .audibility_claim == false
+            ' "$diagnostics/runtime-api26/RUNTIME-GATE.json"
 
       - name: Package exact tested Android application
         shell: bash
@@ -246,6 +322,9 @@ jobs:
           test_apk="platform/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
           cp "$app" "$product/Orkela-Android-API26-37-debug.apk"
           cp "$test_apk" "$product/Orkela-Android-API26-37-debug-test.apk"
+          cp \
+            "$evidence/diagnostics/ANDROID17-EXACT-APK-PROMOTION.json" \
+            "$product/ANDROID17-EXACT-APK-PROMOTION.json"
           python3 - <<'PY' > "$product/BUILD-METADATA.json"
           import json
           import os
@@ -274,17 +353,17 @@ jobs:
                   "compile_api": 37,
                   "target_api": 37,
                   "abis": ["arm64-v8a", "x86_64"],
-                  "runtime_gates": [
-                    "x86_64 API 26 / 4 KiB pages",
-                    "x86_64 API 37 / 4 KiB pages",
-                    "x86_64 API 37 / 16 KiB pages"
-                  ],
+                   "runtime_gates": [
+                     "x86_64 API 26 / 4 KiB pages",
+                     "x86_64 API 37 / 4 KiB pages: 3 cold + exact APK",
+                     "x86_64 API 37 / 16 KiB pages: 3 cold + exact APK"
+                   ],
               },
               "resonith_commit": os.environ["PINNED_RESONITH_COMMIT"],
               "expected_stream_sha256": os.environ["EXPECTED_STREAM_SHA256"],
               "expected_pcm16_sha256": os.environ["EXPECTED_PCM_SHA256"],
               "java": output("java", "-version").splitlines()[0],
-              "integrity_claim": "exact GitHub-built APK tested; not audible-playback or physical-device proof",
+              "integrity_claim": "exact GitHub-built APK and test certificate pair passed byte-verified Android 17 4 KiB/16 KiB guests; not audible-playback or physical-device proof",
           }, indent=2, sort_keys=True))
           PY
           (
@@ -331,7 +410,8 @@ jobs:
             echo "- Product artifact ID: ${{ steps.upload-android-product.outputs.artifact-id }}"
             echo "- Product service digest: \`${{ steps.upload-android-product.outputs.artifact-digest }}\`"
             echo "- Diagnostics artifact ID: ${{ steps.upload-android-diagnostics.outputs.artifact-id }}"
-            echo "- Runtime claim: same APK installed/launched and exact native decode/PCM hash passed on API 26 and API 37 with 4 KiB pages, plus API 37 with 16 KiB pages"
+            echo "- Runtime claim: the same APK/certificate pair passed API 26 and two fresh API 37 exact-APK boots after 3+3 cold boots of byte-verified 4 KiB/16 KiB guest payloads"
+            echo "- Android 17 graphics route: Vulkan + VulkanNativeSwapchain with GuestAngle disabled; the guest image bytes are unchanged, but this is not a stock feature configuration"
             echo "- Play-control evidence requires AudioTrack queue acceptance; it never claims audibility"
           } >> "$GITHUB_STEP_SUMMARY"
 

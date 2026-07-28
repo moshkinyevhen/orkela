@@ -6,51 +6,108 @@
 
 set -euo pipefail
 
-gate="${1:?usage: run_emulator_gate.sh <26|37|37-16k>}"
+gate="${1:?usage: run_emulator_gate.sh <26|37|37-16k> [runtime|boot] [attempt]}"
+gate_mode="${2:-runtime}"
+gate_attempt="${3:-1}"
+if [[ "$gate_mode" != "runtime" && "$gate_mode" != "boot" ]]; then
+  echo "Unsupported Android gate mode: $gate_mode" >&2
+  exit 2
+fi
+if [[ ! "$gate_attempt" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Android gate attempt must be a positive integer" >&2
+  exit 2
+fi
 case "$gate" in
   26)
     runtime_api=26
     expected_page_size=4096
     system_image="system-images;android-26;google_apis;x86_64"
     expected_fingerprint=""
-    emulator_console_port=5554
+    emulator_console_port_base=5554
     ;;
   37)
     runtime_api=37
     expected_page_size=4096
     system_image="system-images;android-37.0;google_apis;x86_64"
     expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
-    emulator_console_port=5556
+    emulator_console_port_base=5556
     ;;
   37-16k)
     runtime_api=37
     expected_page_size=16384
     system_image="system-images;android-37.0;google_apis_ps16k;x86_64"
     expected_fingerprint="google/sdk_gphone16k_x86_64/emu64xa16k:17/CE2A.260420.019/15611780:userdebug/dev-keys"
-    emulator_console_port=5558
+    emulator_console_port_base=5558
     ;;
   *)
     echo "Unsupported runtime gate: $gate" >&2
     exit 2
     ;;
 esac
+if [[ "$gate_mode" == "boot" && "$runtime_api" -ne 37 ]]; then
+  echo "Cold-boot promotion mode is defined only for Android 17" >&2
+  exit 2
+fi
+emulator_console_port=$((emulator_console_port_base + (gate_attempt - 1) * 4))
+if ((emulator_console_port < 5554 || emulator_console_port > 5682)); then
+  echo "Derived Android Emulator console port is outside the supported range" >&2
+  exit 2
+fi
 
 app="${ORKELA_ANDROID_APP_APK:-platform/android/app/build/outputs/apk/debug/app-debug.apk}"
 test_apk="${ORKELA_ANDROID_TEST_APK:-platform/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 evidence_root="${ORKELA_ANDROID_EVIDENCE_ROOT:-build/mobile-evidence/android/diagnostics}"
-evidence="$evidence_root/runtime-api${gate}"
+if [[ "$gate_mode" == "boot" ]]; then
+  evidence="$evidence_root/cold-api${gate}/attempt-${gate_attempt}"
+else
+  evidence="$evidence_root/runtime-api${gate}"
+fi
 avd_name="orkela-api${gate}"
+avd_name="${avd_name}-${gate_mode}-${gate_attempt}"
 expected_pcm="${EXPECTED_PCM_SHA256:?EXPECTED_PCM_SHA256 is required}"
 emulator_pid=""
 device_serial="emulator-$emulator_console_port"
 app_sha256="$(sha256sum "$app" | cut -d' ' -f1)"
 test_apk_sha256="$(sha256sum "$test_apk" | cut -d' ' -f1)"
+app_cert_sha256="${ORKELA_APP_CERT_SHA256:?application certificate digest is required}"
+test_apk_cert_sha256="${ORKELA_TEST_APK_CERT_SHA256:?test certificate digest is required}"
+[[ "$app_cert_sha256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$test_apk_cert_sha256" =~ ^[0-9a-f]{64}$ ]]
+if [[ "$runtime_api" -eq 37 ]]; then
+  emulator_bin="${ORKELA_EMULATOR_BIN:?pinned Emulator binary is required}"
+  test "${ORKELA_EXPECTED_EMULATOR_VERSION:?}" = "37.2.1.0"
+  test "${ORKELA_EMULATOR_REVISION:?}" = "37.2.1"
+  test "${ORKELA_EMULATOR_BUILD_ID:?}" = "15875889"
+  test "${ORKELA_EMULATOR_ARCHIVE_SHA1:?}" \
+    = "1c39ceb4bca042b973344d252a051189d367ab83"
+  test "${ORKELA_EMULATOR_ARCHIVE_SHA256:?}" \
+    = "3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d"
+  test "${ORKELA_EMULATOR_ARCHIVE_SIZE:?}" = "346539649"
+  test "${ORKELA_EMULATOR_ARCHIVE_VERIFIED:?}" = "true"
+else
+  emulator_bin="${ORKELA_EMULATOR_BIN:-$ANDROID_HOME/emulator/emulator}"
+fi
 export ANDROID_USER_HOME="${ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-android-user}"
-export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
+android_state_root="${RUNNER_TEMP:-/tmp}/orkela-android-${gate}-${gate_mode}-${gate_attempt}"
+export ANDROID_USER_HOME="$android_state_root/user"
+export ANDROID_AVD_HOME="$android_state_root/avd"
 
+if [[ -e "$evidence" ]]; then
+  echo "Refusing to reuse stale Android evidence: $evidence" >&2
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$ANDROID_AVD_HOME"
 test -s "$app"
 test -s "$test_apk"
+test -x "$emulator_bin"
+host_kernel_boot_id="$(cat /proc/sys/kernel/random/boot_id)"
+host_kernel_release="$(uname -r)"
+host_kvm_identity="$(
+  stat -Lc '%t:%T:%i:%a:%u:%g' /dev/kvm
+)"
+test -n "$host_kernel_boot_id"
+test -n "$host_kernel_release"
+test -n "$host_kvm_identity"
 
 cleanup() {
   set +e
@@ -65,55 +122,126 @@ cleanup() {
     fi
     wait "$emulator_pid" >/dev/null 2>&1
   fi
-  "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
-    delete avd \
-    --name "$avd_name" \
-    >/dev/null 2>&1
+  timeout --signal=TERM --kill-after=5s 20s \
+    "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+      delete avd \
+      --name "$avd_name" \
+      >/dev/null 2>&1
+  rm -rf -- "$android_state_root"
 }
 trap cleanup EXIT
 
-"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-  "emulator" \
-  "platform-tools" \
-  "$system_image"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 command -v adb
-printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+
+case "$gate" in
+  26)
+    timeout --signal=TERM --kill-after=10s 900s \
+      "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+      "platform-tools" \
+      "$system_image"
+    system_image_dir="$ANDROID_HOME/system-images/android-26/google_apis/x86_64"
+    expected_image_manifest=""
+    ;;
+  37)
+    system_image_dir="$ANDROID_HOME/system-images/android-37.0/google_apis/x86_64"
+    test "${ORKELA_ANDROID17_4K_IMAGE_VERIFIED:?}" = "true"
+    expected_image_manifest="${ORKELA_ANDROID17_4K_IMAGE_MANIFEST:?}"
+    ;;
+  37-16k)
+    system_image_dir="$ANDROID_HOME/system-images/android-37.0/google_apis_ps16k/x86_64"
+    test "${ORKELA_ANDROID17_16K_IMAGE_VERIFIED:?}" = "true"
+    expected_image_manifest="${ORKELA_ANDROID17_16K_IMAGE_MANIFEST:?}"
+    ;;
+esac
+test -d "$system_image_dir"
+write_system_image_manifest() {
+  local output="$1"
+  for image_member in \
+      kernel-ranchu \
+      ramdisk.img \
+      system.img \
+      vendor.img \
+      source.properties \
+      advancedFeatures.ini \
+      build.prop; do
+    test -s "$system_image_dir/$image_member"
+  done
+  if [[ -n "$expected_image_manifest" ]]; then
+    python3 \
+      platform/android/ci/verify_system_image_manifest.py \
+      "$system_image_dir" \
+      "$expected_image_manifest" \
+      --output "$output"
+  else
+    (
+      cd "$system_image_dir"
+      if find . -type l -print -quit | grep -q .; then
+        echo "System-image symlinks are forbidden" >&2
+        exit 1
+      fi
+      find . -type f ! -name package.xml -printf '%P\0' \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum
+    ) > "$output"
+  fi
+}
+write_system_image_manifest "$evidence/SYSTEM-IMAGE-SHA256SUMS"
+if [[ -n "$expected_image_manifest" ]]; then
+  test -s "$expected_image_manifest"
+  cmp "$expected_image_manifest" "$evidence/SYSTEM-IMAGE-SHA256SUMS"
+fi
+
+printf 'no\n' | timeout --signal=TERM --kill-after=10s 90s \
+  "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
   create avd \
   --force \
   --name "$avd_name" \
   --package "$system_image" \
   --device "pixel_2" \
   --path "$ANDROID_AVD_HOME/$avd_name.avd"
-"$ANDROID_HOME/emulator/emulator" -list-avds \
+timeout --signal=TERM --kill-after=5s 20s \
+  "$emulator_bin" -list-avds \
   | grep -Fx "$avd_name" > /dev/null
 
 # Start the ADB server before the emulator so its console/ADB port pair is
 # allocated while ADB is already listening. Android Emulator documents this
 # ordering as material to device discovery for some port assignments.
-adb start-server
+timeout --signal=TERM --kill-after=5s 30s adb start-server
 gpu_mode="software"
 if [[ "$runtime_api" -eq 37 ]]; then
-  # Use one coherent official software renderer for both GLES and Vulkan on the
-  # pinned Android 17 image. Emulator's generic `software` selector chose the
-  # mixed swangle/lavapipe path on GitHub and repeatedly crashed SurfaceFlinger
-  # RegionSampling in GoldfishMapper. SwiftShader keeps the guest compositor,
-  # luma sampling, DMA features, and SELinux unchanged while replacing only the
-  # host renderer selection.
+  # The exact same-host causal A/B gate proved that Emulator 37.2.1 can retain
+  # Vulkan composition while disabling GuestAngle, which otherwise crashed the
+  # Android 17 guest compositor. The guest payload, SELinux mode, and luma
+  # policy remain unchanged; the boot-selected host/guest graphics route does
+  # not, so it is recorded as an explicit correction rather than "stock".
   gpu_mode="swiftshader"
 fi
-"$ANDROID_HOME/emulator/emulator" "@$avd_name" \
-  -no-window \
-  -no-boot-anim \
-  -no-snapshot \
-  -no-audio \
-  -accel on \
-  -cores 2 \
-  -memory 4096 \
-  -partition-size 4096 \
-  -gpu "$gpu_mode" \
-  -port "$emulator_console_port" \
-  -verbose \
+emulator_args=(
+  "@$avd_name"
+  -no-window
+  -no-boot-anim
+  -no-snapshot
+  -no-snapshot-load
+  -no-snapshot-save
+  -no-audio
+  -accel on
+  -cores 2
+  -memory 4096
+  -partition-size 4096
+  -gpu "$gpu_mode"
+  -port "$emulator_console_port"
+  -verbose
+)
+if [[ "$runtime_api" -eq 37 ]]; then
+  emulator_args+=(
+    -feature
+    "Vulkan,VulkanNativeSwapchain,-GuestAngle"
+  )
+fi
+printf '%s\n' "$emulator_bin" "${emulator_args[@]}" \
+  > "$evidence/EMULATOR-COMMAND.txt"
+"$emulator_bin" "${emulator_args[@]}" \
   > "$evidence/logs/emulator.log" 2>&1 &
 emulator_pid="$!"
 
@@ -148,16 +276,25 @@ if [[ "$device_seen" -ne 1 ]]; then
 fi
 export ANDROID_SERIAL="$device_serial"
 
-# API 37 explicitly selects the official SwiftShader software renderer, while
-# all Emulator feature flags and the Android guest compositor remain stock.
+# API 37 explicitly selects SwiftShader and the evidence-backed feature tuple.
+# The guest image bytes remain immutable, but the graphics route is not stock.
 # API 26 retains Emulator's general software selector for legacy coverage.
 emulator_graphics_workaround="none"
-stock_android_guest_compositor_configuration=true
+guest_payload_unmodified=true
 stock_emulator_graphics_feature_configuration=true
+runtime_graphics_configuration_stock=true
+effective_vulkan=0
+effective_vulkan_native_swapchain=0
+effective_guest_vulkan_only=0
+vk_emulation_count=0
+compositor_vk_count=0
+healthy_observations=0
 surfaceflinger_crash_signatures_before=0
+surfaceflinger_crash_signatures_after_boot=0
 compositor_soak_seconds=0
 compositor_soak_screenshots=0
 observed_fingerprint=""
+guest_boot_id=""
 
 ready=0
 boot_deadline=$((SECONDS + 285))
@@ -183,6 +320,13 @@ if [[ "$ready" -ne 1 ]]; then
   echo "Android Emulator did not complete boot within 300 seconds" >&2
   exit 1
 fi
+observed_avd_name="$(
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" emu avd name \
+    | tr -d '\r' \
+    | head -n 1
+)"
+test "$observed_avd_name" = "$avd_name"
 
 # `sys.boot_completed=1` can precede the end of first-boot package and
 # animation work. Require several consecutive healthy service observations so
@@ -355,34 +499,109 @@ if [[ "$stable_observations" -lt 5 ]]; then
   exit 1
 fi
 
-adb shell getprop ro.build.version.sdk | tr -d '\r' | grep -Fxq "$runtime_api"
+timeout --signal=TERM --kill-after=5s 20s \
+  adb shell getprop ro.build.version.sdk \
+  | tr -d '\r' \
+  | grep -Fxq "$runtime_api"
 observed_fingerprint="$(
-  adb shell getprop ro.build.fingerprint | tr -d '\r'
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb shell getprop ro.build.fingerprint \
+    | tr -d '\r'
 )"
+guest_boot_id="$(
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb shell cat /proc/sys/kernel/random/boot_id \
+    | tr -d '\r'
+)"
+test -n "$guest_boot_id"
+printf '%s\n' "$guest_boot_id" > "$evidence/GUEST-BOOT-ID.txt"
+jq -n \
+  --arg source_sha "${GITHUB_SHA:-local}" \
+  --arg run_id "${GITHUB_RUN_ID:-local}" \
+  --arg run_attempt "${GITHUB_RUN_ATTEMPT:-local}" \
+  --arg runner_name "${RUNNER_NAME:-local}" \
+  --arg runner_os "${RUNNER_OS:-local}" \
+  --arg runner_arch "${RUNNER_ARCH:-local}" \
+  --arg image_os "${ImageOS:-local}" \
+  --arg image_version "${ImageVersion:-local}" \
+  --arg host_kernel_boot_id "$host_kernel_boot_id" \
+  --arg host_kernel_release "$host_kernel_release" \
+  --arg host_kvm_identity "$host_kvm_identity" \
+  --arg emulator_bin "$emulator_bin" \
+  --arg avd_name "$avd_name" \
+  --arg avd_path "$ANDROID_AVD_HOME/$avd_name.avd" \
+  --arg device_serial "$device_serial" \
+  --arg guest_boot_id "$guest_boot_id" \
+  '{
+    schema: 1,
+    source_sha: $source_sha,
+    run_id: $run_id,
+    run_attempt: $run_attempt,
+    runner_name: $runner_name,
+    runner_os: $runner_os,
+    runner_arch: $runner_arch,
+    image_os: $image_os,
+    image_version: $image_version,
+    host_kernel_boot_id: $host_kernel_boot_id,
+    host_kernel_release: $host_kernel_release,
+    host_kvm_identity: $host_kvm_identity,
+    emulator_bin: $emulator_bin,
+    avd_name: $avd_name,
+    avd_path: $avd_path,
+    device_serial: $device_serial,
+    guest_boot_id: $guest_boot_id
+  }' > "$evidence/HOST-AND-AVD-IDENTITY.json"
 surfaceflinger_pid_initial="$(
   timeout --signal=TERM --kill-after=5s 10s \
     adb shell pidof surfaceflinger \
     | tr -d '\r'
 )"
 test -n "$surfaceflinger_pid_initial"
-renderer_egl="$(adb shell getprop ro.hardware.egl | tr -d '\r')"
+renderer_egl="$(
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb shell getprop ro.hardware.egl \
+    | tr -d '\r'
+)"
+boot_hardware_egl="$(
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb shell getprop ro.boot.hardwareegl \
+    | tr -d '\r'
+)"
 renderer_transport="$(
-  adb shell getprop ro.boot.qemu.gltransport.name | tr -d '\r'
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb shell getprop ro.boot.qemu.gltransport.name \
+    | tr -d '\r'
 )"
 luma_sampling="$(
-  adb shell getprop debug.sf.luma_sampling | tr -d '\r'
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb shell getprop debug.sf.luma_sampling \
+    | tr -d '\r'
 )"
 emulator_version="$(
-  grep -m1 -F "Android emulator version" \
-    "$evidence/logs/emulator.log" \
-    | sed -E 's/^[^|]*\|[[:space:]]*//'
+  timeout --signal=TERM --kill-after=5s 20s \
+    "$emulator_bin" -version 2>&1 \
+    | sed -n 's/^.*Android emulator version \([^ ]*\).*/\1/p' \
+    | head -n 1
 )"
 test -n "$emulator_version"
 
 if [[ "$runtime_api" -eq 37 ]]; then
-  build_id="$(adb shell getprop ro.build.id | tr -d '\r')"
-  debuggable="$(adb shell getprop ro.debuggable | tr -d '\r')"
-  selinux_mode="$(adb shell getenforce | tr -d '\r')"
+  build_id="$(
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb shell getprop ro.build.id \
+      | tr -d '\r'
+  )"
+  debuggable="$(
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb shell getprop ro.debuggable \
+      | tr -d '\r'
+  )"
+  selinux_mode="$(
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb shell getenforce \
+      | tr -d '\r'
+  )"
+  printf '%s\n' "$selinux_mode" > "$evidence/SELINUX.txt"
   test "$observed_fingerprint" = "$expected_fingerprint"
   test "$build_id" = "CE2A.260420.019"
   test "$debuggable" = "1"
@@ -392,54 +611,131 @@ if [[ "$runtime_api" -eq 37 ]]; then
     exit 1
   fi
 
-  grep -Fq \
-    "emuglConfig_init: gpu_mode_requested: swiftshader" \
+  test "${ORKELA_EXPECTED_EMULATOR_VERSION:-}" = "37.2.1.0"
+  test "${ORKELA_EMULATOR_REVISION:-}" = "37.2.1"
+  test "${ORKELA_EMULATOR_BUILD_ID:-}" = "15875889"
+  test "${ORKELA_EMULATOR_ARCHIVE_SHA256:-}" \
+    = "3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d"
+  test "${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-}" = "true"
+  grep -Fq "Android emulator version 37.2.1.0" \
     "$evidence/logs/emulator.log"
-  grep -Fq \
-    "emuglConfig_init: vulkan_mode_selected:swiftshader gles_mode_selected:swiftshader" \
-    "$evidence/logs/emulator.log"
-  grep -Fq \
-    "Graphics Adapter Android Emulator OpenGL ES Translator (Google SwiftShader)" \
-    "$evidence/logs/emulator.log"
+  test "$(
+    grep -Ec \
+      "Feature 'GuestAngle'.*overridden to 'disabled'" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 0
+  test "$(
+    grep -Ec \
+      "Auto-enabled GuestAngle feature for VulkanNativeSwapchain" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 0
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:Vulkan[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*1[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec \
+      "gfxstreamFeature:GuestVulkanOnly[[:space:]]*=[[:space:]]*0[[:space:]]*$" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  effective_renderer_line="$(
+    grep -F "setCurrentRenderer:" "$evidence/logs/emulator.log" \
+      | sed -E 's/^.*setCurrentRenderer:/setCurrentRenderer:/' \
+      || true
+  )"
+  test "$effective_renderer_line" \
+    = "setCurrentRenderer: swiftshader swiftshader gles:Swiftshader Indirect vulkan:Swiftshader Indirect"
+  test "$(
+    grep -Ec "Initializing VkEmulation features" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec "useVulkanComposition:[[:space:]]*true" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec "useVulkanNativeSwapchain:[[:space:]]*true" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test "$(
+    grep -Ec "Performing composition using CompositorVk" \
+      "$evidence/logs/emulator.log" \
+      || true
+  )" -eq 1
+  test -z "$boot_hardware_egl"
+  test "$renderer_egl" = "emulation"
 
   {
     echo "fingerprint=$observed_fingerprint"
     echo "build_id=$build_id"
     echo "selinux=$selinux_mode"
     echo "renderer_egl=$renderer_egl"
+    echo "boot_hardware_egl=${boot_hardware_egl:-empty}"
     echo "renderer_transport=$renderer_transport"
+    echo "effective_renderer=$effective_renderer_line"
     echo "emulator=$emulator_version"
     echo "gpu_mode=$gpu_mode"
-    echo "gles_backend=swiftshader"
+    echo "gles_backend=emulation"
     echo "vulkan_backend=swiftshader"
-    echo "emulator_feature_overrides=none"
+    echo "emulator_feature_overrides=Vulkan,VulkanNativeSwapchain,-GuestAngle"
+    echo "emulator_archive_sha256=${ORKELA_EMULATOR_ARCHIVE_SHA256}"
     echo "guest_luma_sampling=${luma_sampling:-default}"
     echo "surfaceflinger_pid=$surfaceflinger_pid_initial"
   } > "$evidence/EMULATOR-GRAPHICS-CONFIGURATION.txt"
-  emulator_graphics_workaround="official-explicit-swiftshader"
+  emulator_graphics_workaround="vulkan-compositor-with-guest-angle-disabled"
+  stock_emulator_graphics_feature_configuration=false
+  runtime_graphics_configuration_stock=false
+  effective_vulkan=1
+  effective_vulkan_native_swapchain=1
+  effective_guest_vulkan_only=0
+  vk_emulation_count=1
+  compositor_vk_count=1
+  healthy_observations=24
 fi
 
 timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
   > "$evidence/logs/logcat-crash-before-app-gate.txt"
-surfaceflinger_crash_signatures_before="$(
+  surfaceflinger_crash_signatures_before="$(
   grep -Eic \
-    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT" \
+    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT|createCoherentMemory|libGLESv2_angle|MESA.+virtual memory" \
     "$evidence/logs/logcat-crash-before-app-gate.txt" \
     || true
 )"
+surfaceflinger_crash_signatures_after_boot="$surfaceflinger_crash_signatures_before"
 
 if [[ "$runtime_api" -eq 37 ]]; then
   # The original failure recurred every 30-31 seconds in RegionSampling. A few
-  # fast service checks can therefore pass between crashes. Exercise the stock
-  # luma/compositor path for four full failure periods and require the same
+  # fast service checks can therefore pass between crashes. Exercise the guest
+  # luma/compositor workload for four full failure periods and require the same
   # SurfaceFlinger process, healthy Binder/storage state, four complete
   # screenshots, and no matching crash record.
   test "$surfaceflinger_crash_signatures_before" -eq 0
   compositor_soak_screenshots=4
   soak_log="$evidence/logs/compositor-soak.log"
-  soak_started="$SECONDS"
+  soak_started_uptime="$(cut -d' ' -f1 /proc/uptime)"
+  test -n "$soak_started_uptime"
   printf '%s\n' \
-    "utc,observation,surfaceflinger_pid,package,surfaceflinger,mount,volumes" \
+    "utc,host_uptime_seconds,observation,surfaceflinger_pid,package,surfaceflinger,mount,volumes" \
     > "$soak_log"
   for observation in $(seq 1 24); do
     soak_surfaceflinger_pid="$(
@@ -467,8 +763,10 @@ if [[ "$runtime_api" -eq 37 ]]; then
         adb -s "$device_serial" shell sm list-volumes all \
         | tr -d '\r'
     )"
-    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+    observation_uptime="$(cut -d' ' -f1 /proc/uptime)"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
       "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+      "$observation_uptime" \
       "$observation" \
       "$soak_surfaceflinger_pid" \
       "$(printf '%s' "$soak_package" | tr '\r\n\t,' '    ')" \
@@ -504,21 +802,50 @@ if [[ "$runtime_api" -eq 37 ]]; then
     esac
     sleep 5
   done
-  compositor_soak_seconds=$((SECONDS - soak_started))
+  soak_ended_uptime="$(cut -d' ' -f1 /proc/uptime)"
+  compositor_soak_seconds="$(
+    awk \
+      -v start="$soak_started_uptime" \
+      -v end="$soak_ended_uptime" \
+      'BEGIN { print int(end - start) }'
+  )"
+  printf 'start_uptime_seconds=%s\nend_uptime_seconds=%s\n' \
+    "$soak_started_uptime" \
+    "$soak_ended_uptime" \
+    > "$evidence/COMPOSITOR-SOAK-UPTIME.txt"
   test "$compositor_soak_seconds" -ge 120
   soak_surfaceflinger_pid_final="$(
-    adb -s "$device_serial" shell pidof surfaceflinger | tr -d '\r'
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb -s "$device_serial" shell pidof surfaceflinger \
+      | tr -d '\r'
   )"
   test "$soak_surfaceflinger_pid_final" = "$surfaceflinger_pid_initial"
   timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
     > "$evidence/logs/logcat-crash-after-compositor-soak.txt"
   soak_crash_signatures="$(
     grep -Eic \
-      "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT" \
+      "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT|createCoherentMemory|libGLESv2_angle|MESA.+virtual memory" \
       "$evidence/logs/logcat-crash-after-compositor-soak.txt" \
       || true
   )"
   test "$soak_crash_signatures" -eq 0
+  surfaceflinger_crash_signatures_after_boot="$soak_crash_signatures"
+  updatable_crashing="$(
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb -s "$device_serial" shell getprop sys.init.updatable_crashing \
+      | tr -d '\r'
+  )"
+  updatable_crashing_process="$(
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb -s "$device_serial" shell \
+      getprop sys.init.updatable_crashing_process_name \
+      | tr -d '\r'
+  )"
+  if [[ "$updatable_crashing" == "1" \
+      || "$updatable_crashing_process" == "surfaceflinger" ]]; then
+    echo "Android reports an updatable SurfaceFlinger crash" >&2
+    exit 1
+  fi
   python3 - \
     "$compositor_soak_seconds" \
     "$evidence/compositor-soak-1.png" \
@@ -696,6 +1023,31 @@ print(json.dumps({
     "screenshots": records,
 }, indent=2, sort_keys=True))
 PY
+  timeout --signal=TERM --kill-after=5s 45s \
+    adb -s "$device_serial" logcat -b all -v threadtime -d \
+    > "$evidence/logs/logcat-all-after-compositor-soak.txt"
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" shell getprop \
+    > "$evidence/logs/getprop-after-compositor-soak.txt"
+  python3 platform/android/ci/analyze_guest_boot_evidence.py \
+    "$evidence/logs/logcat-all-after-compositor-soak.txt" \
+    "$evidence/logs/getprop-after-compositor-soak.txt" \
+    "$evidence/GUEST-BOOT-ANALYSIS.json"
+  jq -e \
+    --arg fingerprint "$expected_fingerprint" \
+    '
+      .surfaceflinger_tombstone_records == 0
+      and .surfaceflinger_abort_tombstones == 0
+      and .coherent_memory_angle_abort_tombstones == 0
+      and .surfaceflinger_fatal_signals == 0
+      and .unsupported_virtual_memory_fatals == 0
+      and .boot_completed_property == "1"
+      and .updatable_crashing_property != "1"
+      and .updatable_crashing_process_name != "surfaceflinger"
+      and .observed_fingerprint == $fingerprint
+      and .boot_hardware_egl == ""
+      and .hardware_egl == "emulation"
+    ' "$evidence/GUEST-BOOT-ANALYSIS.json"
 fi
 
 # API 26 lacks getconf. Newer runtimes expose the kernel page size directly;
@@ -703,11 +1055,14 @@ fi
 # describe a 4-KiB compatibility mapping even on a 16-KiB kernel.
 if [[ "$runtime_api" -ge 37 ]]; then
   actual_page_size="$(
-    adb shell getconf PAGE_SIZE | tr -d '\r'
+    timeout --signal=TERM --kill-after=5s 20s \
+      adb shell getconf PAGE_SIZE \
+      | tr -d '\r'
   )"
 else
   actual_page_kib="$(
-    adb shell cat /proc/self/smaps \
+    timeout --signal=TERM --kill-after=5s 30s \
+      adb shell cat /proc/self/smaps \
       | tr -d '\r' \
       | awk '
           $1 == "KernelPageSize:" && $3 == "kB" {
@@ -723,24 +1078,146 @@ else
 fi
 test -n "$actual_page_size"
 test "$actual_page_size" -eq "$expected_page_size"
-adb shell getprop > "$evidence/DEVICE-PROPERTIES.txt"
-adb shell df -k > "$evidence/DEVICE-STORAGE.txt"
+printf '%s\n' "$actual_page_size" > "$evidence/PAGE-SIZE.txt"
+timeout --signal=TERM --kill-after=5s 30s \
+  adb shell getprop > "$evidence/DEVICE-PROPERTIES.txt"
+timeout --signal=TERM --kill-after=5s 30s \
+  adb shell df -k > "$evidence/DEVICE-STORAGE.txt"
 
-adb install --no-streaming -r "$app"
-adb install --no-streaming -r "$test_apk"
-adb shell pm path org.scenelith.orkela \
+if [[ "$gate_mode" == "boot" ]]; then
+  write_system_image_manifest \
+    "$evidence/SYSTEM-IMAGE-SHA256SUMS-AFTER"
+  cmp \
+    "$evidence/SYSTEM-IMAGE-SHA256SUMS" \
+    "$evidence/SYSTEM-IMAGE-SHA256SUMS-AFTER"
+  (
+    cd "$evidence"
+    find . -type f \
+      ! -name BOOT-GATE.json \
+      ! -name RAW-EVIDENCE-SHA256SUMS \
+      -print0 \
+      | sort -z \
+      | xargs -0 sha256sum
+  ) > "$evidence/RAW-EVIDENCE-SHA256SUMS"
+  raw_evidence_manifest_sha256="$(
+    sha256sum "$evidence/RAW-EVIDENCE-SHA256SUMS" | cut -d' ' -f1
+  )"
+  system_image_manifest_sha256="$(
+    sha256sum "$evidence/SYSTEM-IMAGE-SHA256SUMS" | cut -d' ' -f1
+  )"
+  jq -n \
+    --argjson runtime_api "$runtime_api" \
+    --argjson page_size "$actual_page_size" \
+    --argjson attempt "$gate_attempt" \
+    --arg system_image "$system_image" \
+    --arg system_fingerprint "$observed_fingerprint" \
+    --arg app_sha256 "$app_sha256" \
+    --arg test_apk_sha256 "$test_apk_sha256" \
+    --arg app_cert_sha256 "$app_cert_sha256" \
+    --arg test_apk_cert_sha256 "$test_apk_cert_sha256" \
+    --arg source_sha "${GITHUB_SHA:-local}" \
+    --arg guest_boot_id "$guest_boot_id" \
+    --slurpfile host_identity "$evidence/HOST-AND-AVD-IDENTITY.json" \
+    --arg emulator_version "$emulator_version" \
+    --arg emulator_revision "${ORKELA_EMULATOR_REVISION}" \
+    --argjson emulator_build_id "${ORKELA_EMULATOR_BUILD_ID}" \
+    --arg emulator_archive_sha1 "${ORKELA_EMULATOR_ARCHIVE_SHA1}" \
+    --arg emulator_archive_sha256 \
+      "${ORKELA_EMULATOR_ARCHIVE_SHA256}" \
+    --argjson emulator_archive_size "${ORKELA_EMULATOR_ARCHIVE_SIZE}" \
+    --arg system_image_manifest_sha256 \
+      "$system_image_manifest_sha256" \
+    --arg raw_evidence_manifest_sha256 \
+      "$raw_evidence_manifest_sha256" \
+    --arg selinux "$selinux_mode" \
+    --arg luma_sampling "${luma_sampling:-default}" \
+    --arg effective_renderer "$effective_renderer_line" \
+    --arg renderer_transport "$renderer_transport" \
+    --arg initial_surfaceflinger_pid "$surfaceflinger_pid_initial" \
+    --arg final_surfaceflinger_pid "$soak_surfaceflinger_pid_final" \
+    --arg emulator_feature_overrides "$(
+      if [[ "$runtime_api" -eq 37 ]]; then
+        printf '%s' 'Vulkan,VulkanNativeSwapchain,-GuestAngle'
+      else
+        printf '%s' 'none'
+      fi
+    )" \
+    --argjson compositor_soak_seconds "$compositor_soak_seconds" \
+    --argjson compositor_soak_screenshots "$compositor_soak_screenshots" \
+    --argjson surfaceflinger_crash_signatures_before \
+      "$surfaceflinger_crash_signatures_before" \
+    --argjson surfaceflinger_crash_signatures_after \
+      "$surfaceflinger_crash_signatures_after_boot" \
+    '{
+      schema: 1,
+      gate: "cold-boot",
+      attempt: $attempt,
+      host: $host_identity[0],
+      runtime_api: $runtime_api,
+      page_size: $page_size,
+      system_image: $system_image,
+      system_fingerprint: $system_fingerprint,
+      app_sha256: $app_sha256,
+      test_apk_sha256: $test_apk_sha256,
+      app_cert_sha256: $app_cert_sha256,
+      test_apk_cert_sha256: $test_apk_cert_sha256,
+      source_sha: $source_sha,
+      guest_boot_id: $guest_boot_id,
+      emulator_version: $emulator_version,
+      emulator_revision: $emulator_revision,
+      emulator_build_id: $emulator_build_id,
+      emulator_archive_sha1: $emulator_archive_sha1,
+      emulator_archive_sha256: $emulator_archive_sha256,
+      emulator_archive_size: $emulator_archive_size,
+      system_image_manifest_sha256: $system_image_manifest_sha256,
+      raw_evidence_manifest_sha256: $raw_evidence_manifest_sha256,
+      emulator_feature_overrides: $emulator_feature_overrides,
+      effective_renderer: $effective_renderer,
+      renderer_transport: $renderer_transport,
+      effective_vulkan: 1,
+      effective_vulkan_native_swapchain: 1,
+      effective_guest_vulkan_only: 0,
+      vk_emulation_count: 1,
+      compositor_vk_count: 1,
+      boot_completed: true,
+      selinux: $selinux,
+      luma_sampling: $luma_sampling,
+      guest_payload_unmodified: true,
+      runtime_graphics_configuration_stock: false,
+      healthy_observations: 24,
+      initial_surfaceflinger_pid: $initial_surfaceflinger_pid,
+      final_surfaceflinger_pid: $final_surfaceflinger_pid,
+      compositor_soak_seconds: $compositor_soak_seconds,
+      compositor_soak_screenshots: $compositor_soak_screenshots,
+      surfaceflinger_crash_signatures_before:
+        $surfaceflinger_crash_signatures_before,
+      surfaceflinger_crash_signatures_after:
+        $surfaceflinger_crash_signatures_after
+    }' > "$evidence/BOOT-GATE.json"
+  exit 0
+fi
+
+timeout --signal=TERM --kill-after=10s 180s \
+  adb -s "$device_serial" install --no-streaming -r "$app"
+timeout --signal=TERM --kill-after=10s 180s \
+  adb -s "$device_serial" install --no-streaming -r "$test_apk"
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" shell pm path org.scenelith.orkela \
   | tr -d '\r' \
   | grep -Fq "package:"
-adb shell pm path org.scenelith.orkela.test \
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" shell pm path org.scenelith.orkela.test \
   | tr -d '\r' \
   | grep -Fq "package:"
 sleep 5
-adb logcat -b all -d \
+timeout --signal=TERM --kill-after=5s 45s \
+  adb -s "$device_serial" logcat -b all -d \
   > "$evidence/logs/logcat-before-instrumentation.txt"
 
 set +e
-adb shell am instrument -w -r \
-  org.scenelith.orkela.test/org.scenelith.orkela.NativeDecodeInstrumentation \
+timeout --signal=TERM --kill-after=10s 300s \
+  adb -s "$device_serial" shell am instrument -w -r \
+    org.scenelith.orkela.test/org.scenelith.orkela.NativeDecodeInstrumentation \
   2>&1 | tee "$evidence/logs/instrumentation.log"
 instrumentation_status="${PIPESTATUS[0]}"
 set -e
@@ -773,8 +1250,9 @@ if [[ "$instrumentation_ok" -ne 1 ]]; then
     || true
   exit 1
 fi
-adb exec-out run-as org.scenelith.orkela \
-  cat files/orkela-ci-smoke.json \
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" exec-out run-as org.scenelith.orkela \
+    cat files/orkela-ci-smoke.json \
   > "$evidence/orkela-ci-smoke.json"
 jq -e \
   --arg expected "$expected_pcm" \
@@ -790,25 +1268,33 @@ jq -e \
 # API 26 logd can reject `logcat -c` even on an emulator. Keep the existing
 # ring buffer and establish monotonic baselines instead: the UI gate must add a
 # new AudioTrack write and must not add a new fatal/playback error.
-adb logcat -d > "$evidence/logs/logcat-before-play.txt"
+timeout --signal=TERM --kill-after=5s 45s \
+  adb -s "$device_serial" logcat -d \
+  > "$evidence/logs/logcat-before-play.txt"
 baseline_queue_writes="$(
   grep -Fc "ORKELA_AUDIO_QUEUE_WRITE accepted_elements=" \
     "$evidence/logs/logcat-before-play.txt" \
     || true
 )"
+accepted_elements=0
 baseline_playback_errors="$(
   grep -Ec "FATAL EXCEPTION|Playback failed:" \
     "$evidence/logs/logcat-before-play.txt" \
     || true
 )"
-adb shell am force-stop org.scenelith.orkela
-adb shell am start -W \
-  -n org.scenelith.orkela/.MainActivity \
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" shell am force-stop org.scenelith.orkela
+timeout --signal=TERM --kill-after=5s 60s \
+  adb -s "$device_serial" shell am start -W \
+    -n org.scenelith.orkela/.MainActivity \
   | tee "$evidence/logs/activity-start.log"
 ui_ready=0
 for _ in $(seq 1 30); do
-  if adb shell uiautomator dump /sdcard/orkela-window.xml >/dev/null \
-      && adb pull /sdcard/orkela-window.xml \
+  if timeout --signal=TERM --kill-after=5s 30s \
+      adb -s "$device_serial" shell \
+        uiautomator dump /sdcard/orkela-window.xml >/dev/null \
+      && timeout --signal=TERM --kill-after=5s 30s \
+        adb -s "$device_serial" pull /sdcard/orkela-window.xml \
         "$evidence/orkela-window.xml" >/dev/null; then
     if grep -Fq \
         'resource-id="org.scenelith.orkela:id/play_button"' \
@@ -820,7 +1306,9 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 test "$ui_ready" -eq 1
-adb exec-out screencap -p > "$evidence/orkela-android.png"
+timeout --signal=TERM --kill-after=5s 45s \
+  adb -s "$device_serial" exec-out screencap -p \
+  > "$evidence/orkela-android.png"
 python3 - "$evidence/orkela-android.png" \
   > "$evidence/ORKELA-SCREENSHOT.json" <<'PY'
 import json
@@ -900,10 +1388,13 @@ for node in root.iter("node"):
 raise SystemExit(1)
 PY
 read -r play_x play_y < "$evidence/play-point.txt"
-adb shell input tap "$play_x" "$play_y"
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" shell input tap "$play_x" "$play_y"
 queue_write_seen=0
 for _ in $(seq 1 20); do
-  adb logcat -d > "$evidence/logs/logcat.txt"
+  timeout --signal=TERM --kill-after=5s 45s \
+    adb -s "$device_serial" logcat -d \
+    > "$evidence/logs/logcat.txt"
   current_playback_errors="$(
     grep -Ec "FATAL EXCEPTION|Playback failed:" \
       "$evidence/logs/logcat.txt" \
@@ -914,8 +1405,11 @@ for _ in $(seq 1 20); do
       > "$evidence/PLAY-CONTROL-DIAGNOSTIC.txt"
     exit 1
   fi
-  if adb shell uiautomator dump /sdcard/orkela-after-play.xml >/dev/null \
-      && adb pull /sdcard/orkela-after-play.xml \
+  if timeout --signal=TERM --kill-after=5s 30s \
+      adb -s "$device_serial" shell \
+        uiautomator dump /sdcard/orkela-after-play.xml >/dev/null \
+      && timeout --signal=TERM --kill-after=5s 30s \
+        adb -s "$device_serial" pull /sdcard/orkela-after-play.xml \
         "$evidence/orkela-after-play.xml" >/dev/null; then
     if grep -Eiq "failed|cannot decode|error" \
         "$evidence/orkela-after-play.xml"; then
@@ -930,17 +1424,30 @@ for _ in $(seq 1 20); do
       || true
   )"
   if ((current_queue_writes > baseline_queue_writes)); then
-    queue_write_seen=1
-    break
+    accepted_elements="$(
+      grep -Eo "ORKELA_AUDIO_QUEUE_WRITE accepted_elements=[0-9]+" \
+        "$evidence/logs/logcat.txt" \
+        | tail -n 1 \
+        | cut -d= -f2
+    )"
+    if [[ "$accepted_elements" =~ ^[1-9][0-9]*$ ]]; then
+      queue_write_seen=1
+      break
+    fi
   fi
   sleep 1
 done
 test "$queue_write_seen" -eq 1
 echo "play_control_diagnostic=audio-queue-write-observed-without-audibility-claim" \
   > "$evidence/PLAY-CONTROL-DIAGNOSTIC.txt"
-adb shell am force-stop org.scenelith.orkela
+printf 'accepted_elements=%s\n' "$accepted_elements" \
+  > "$evidence/AUDIO-QUEUE-EVIDENCE.txt"
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" shell am force-stop org.scenelith.orkela
 
-adb shell run-as org.scenelith.orkela find . -type f \
+timeout --signal=TERM --kill-after=5s 30s \
+  adb -s "$device_serial" shell \
+    run-as org.scenelith.orkela find . -type f \
   | tr -d '\r' \
   | sort \
   > "$evidence/APP-DATA-FILES.txt"
@@ -954,7 +1461,7 @@ timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
   > "$evidence/logs/logcat-crash-after-gate.txt"
 surfaceflinger_crash_signatures_after="$(
   grep -Eic \
-    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT" \
+    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT|createCoherentMemory|libGLESv2_angle|MESA.+virtual memory" \
     "$evidence/logs/logcat-crash-after-gate.txt" \
     || true
 )"
@@ -967,8 +1474,53 @@ if [[ "$runtime_api" -eq 37 ]]; then
   test "$surfaceflinger_pid_final" = "$surfaceflinger_pid_initial"
   test "$surfaceflinger_crash_signatures_after" \
     -le "$surfaceflinger_crash_signatures_before"
+  timeout --signal=TERM --kill-after=5s 45s \
+    adb -s "$device_serial" logcat -b all -v threadtime -d \
+    > "$evidence/logs/logcat-all-after-runtime-gate.txt"
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" shell getprop \
+    > "$evidence/logs/getprop-after-runtime-gate.txt"
+  python3 platform/android/ci/analyze_guest_boot_evidence.py \
+    "$evidence/logs/logcat-all-after-runtime-gate.txt" \
+    "$evidence/logs/getprop-after-runtime-gate.txt" \
+    "$evidence/GUEST-RUNTIME-ANALYSIS.json"
+  jq -e \
+    --arg fingerprint "$expected_fingerprint" \
+    '
+      .surfaceflinger_tombstone_records == 0
+      and .surfaceflinger_abort_tombstones == 0
+      and .coherent_memory_angle_abort_tombstones == 0
+      and .surfaceflinger_fatal_signals == 0
+      and .unsupported_virtual_memory_fatals == 0
+      and .boot_completed_property == "1"
+      and .updatable_crashing_property != "1"
+      and .updatable_crashing_process_name != "surfaceflinger"
+      and .observed_fingerprint == $fingerprint
+      and .boot_hardware_egl == ""
+      and .hardware_egl == "emulation"
+    ' "$evidence/GUEST-RUNTIME-ANALYSIS.json"
 fi
 
+write_system_image_manifest \
+  "$evidence/SYSTEM-IMAGE-SHA256SUMS-AFTER"
+cmp \
+  "$evidence/SYSTEM-IMAGE-SHA256SUMS" \
+  "$evidence/SYSTEM-IMAGE-SHA256SUMS-AFTER"
+(
+  cd "$evidence"
+  find . -type f \
+    ! -name RUNTIME-GATE.json \
+    ! -name RAW-EVIDENCE-SHA256SUMS \
+    -print0 \
+    | sort -z \
+    | xargs -0 sha256sum
+) > "$evidence/RAW-EVIDENCE-SHA256SUMS"
+raw_evidence_manifest_sha256="$(
+  sha256sum "$evidence/RAW-EVIDENCE-SHA256SUMS" | cut -d' ' -f1
+)"
+system_image_manifest_sha256="$(
+  sha256sum "$evidence/SYSTEM-IMAGE-SHA256SUMS" | cut -d' ' -f1
+)"
 jq -n \
   --argjson runtime_api "$runtime_api" \
   --argjson page_size "$actual_page_size" \
@@ -976,22 +1528,64 @@ jq -n \
   --arg expected_pcm16_sha256 "$expected_pcm" \
   --arg app_sha256 "$app_sha256" \
   --arg test_apk_sha256 "$test_apk_sha256" \
+  --arg app_cert_sha256 "$app_cert_sha256" \
+  --arg test_apk_cert_sha256 "$test_apk_cert_sha256" \
+  --arg application_id "org.scenelith.orkela" \
+  --arg version_name "0.3.0-alpha.6" \
+  --arg expected_stream_sha256 "${EXPECTED_STREAM_SHA256}" \
+  --arg source_sha "${GITHUB_SHA:-local}" \
   --arg system_fingerprint "$observed_fingerprint" \
+  --arg guest_boot_id "$guest_boot_id" \
+  --slurpfile host_identity "$evidence/HOST-AND-AVD-IDENTITY.json" \
   --arg emulator_version "$emulator_version" \
+  --arg emulator_revision "${ORKELA_EMULATOR_REVISION:-sdk-managed}" \
+  --arg emulator_build_id "${ORKELA_EMULATOR_BUILD_ID:-sdk-managed}" \
+  --arg emulator_archive_sha1 "${ORKELA_EMULATOR_ARCHIVE_SHA1:-sdk-managed}" \
   --arg renderer_egl "$renderer_egl" \
   --arg renderer_transport "$renderer_transport" \
   --arg emulator_gpu_mode "$gpu_mode" \
   --arg emulator_graphics_workaround "$emulator_graphics_workaround" \
+  --arg emulator_archive_sha256 \
+    "${ORKELA_EMULATOR_ARCHIVE_SHA256:-sdk-managed}" \
+  --arg emulator_archive_size "${ORKELA_EMULATOR_ARCHIVE_SIZE:-sdk-managed}" \
+  --arg system_image_manifest_sha256 \
+    "$system_image_manifest_sha256" \
+  --arg raw_evidence_manifest_sha256 \
+    "$raw_evidence_manifest_sha256" \
+  --arg selinux "${selinux_mode:-not-applicable}" \
+  --arg luma_sampling "${luma_sampling:-default}" \
+  --arg effective_renderer "${effective_renderer_line:-not-applicable}" \
+  --arg initial_surfaceflinger_pid "$surfaceflinger_pid_initial" \
+  --arg final_surfaceflinger_pid \
+    "${surfaceflinger_pid_final:-$surfaceflinger_pid_initial}" \
+  --arg emulator_feature_overrides "$(
+    if [[ "$runtime_api" -eq 37 ]]; then
+      printf '%s' 'Vulkan,VulkanNativeSwapchain,-GuestAngle'
+    else
+      printf '%s' 'none'
+    fi
+  )" \
   --argjson compositor_soak_seconds "$compositor_soak_seconds" \
   --argjson compositor_soak_screenshots "$compositor_soak_screenshots" \
-  --argjson stock_android_guest_compositor_configuration \
-    "$stock_android_guest_compositor_configuration" \
+  --argjson guest_payload_unmodified \
+    "$guest_payload_unmodified" \
   --argjson stock_emulator_graphics_feature_configuration \
     "$stock_emulator_graphics_feature_configuration" \
+  --argjson runtime_graphics_configuration_stock \
+    "$runtime_graphics_configuration_stock" \
+  --argjson effective_vulkan "$effective_vulkan" \
+  --argjson effective_vulkan_native_swapchain \
+    "$effective_vulkan_native_swapchain" \
+  --argjson effective_guest_vulkan_only \
+    "$effective_guest_vulkan_only" \
+  --argjson vk_emulation_count "$vk_emulation_count" \
+  --argjson compositor_vk_count "$compositor_vk_count" \
+  --argjson healthy_observations "$healthy_observations" \
   --argjson surfaceflinger_crash_signatures_before \
     "$surfaceflinger_crash_signatures_before" \
   --argjson surfaceflinger_crash_signatures_after \
     "$surfaceflinger_crash_signatures_after" \
+  --argjson accepted_audio_elements "$accepted_elements" \
   '{
     schema: 1,
     runtime_api: $runtime_api,
@@ -999,23 +1593,58 @@ jq -n \
     system_image: $system_image,
     app_sha256: $app_sha256,
     test_apk_sha256: $test_apk_sha256,
+    app_cert_sha256: $app_cert_sha256,
+    test_apk_cert_sha256: $test_apk_cert_sha256,
+    application_id: $application_id,
+    version_name: $version_name,
+    expected_stream_sha256: $expected_stream_sha256,
+    source_sha: $source_sha,
+    host: $host_identity[0],
     native_decode: "pass",
     expected_pcm16_sha256: $expected_pcm16_sha256,
+    decoded_frames: 352800,
+    decoded_sample_rate: 44100,
+    decoded_channels: 2,
     system_fingerprint: $system_fingerprint,
+    guest_boot_id: $guest_boot_id,
     emulator_version: $emulator_version,
+    emulator_revision: $emulator_revision,
+    emulator_build_id: $emulator_build_id,
+    emulator_archive_sha1: $emulator_archive_sha1,
+    emulator_archive_size: $emulator_archive_size,
+    system_image_manifest_sha256: $system_image_manifest_sha256,
+    raw_evidence_manifest_sha256: $raw_evidence_manifest_sha256,
     renderer_egl: $renderer_egl,
     renderer_transport: $renderer_transport,
     emulator_gpu_mode: $emulator_gpu_mode,
     compositor_soak_seconds: $compositor_soak_seconds,
     compositor_soak_screenshots: $compositor_soak_screenshots,
-    stock_android_guest_compositor_configuration:
-      $stock_android_guest_compositor_configuration,
+    guest_payload_unmodified: $guest_payload_unmodified,
     stock_emulator_graphics_feature_configuration:
       $stock_emulator_graphics_feature_configuration,
+    runtime_graphics_configuration_stock:
+      $runtime_graphics_configuration_stock,
     emulator_graphics_workaround: $emulator_graphics_workaround,
+    emulator_archive_sha256: $emulator_archive_sha256,
+    emulator_feature_overrides: $emulator_feature_overrides,
+    effective_renderer: $effective_renderer,
+    effective_vulkan: $effective_vulkan,
+    effective_vulkan_native_swapchain:
+      $effective_vulkan_native_swapchain,
+    effective_guest_vulkan_only: $effective_guest_vulkan_only,
+    vk_emulation_count: $vk_emulation_count,
+    compositor_vk_count: $compositor_vk_count,
+    boot_completed: true,
+    healthy_observations: $healthy_observations,
+    selinux: $selinux,
+    luma_sampling: $luma_sampling,
+    initial_surfaceflinger_pid: $initial_surfaceflinger_pid,
+    final_surfaceflinger_pid: $final_surfaceflinger_pid,
     surfaceflinger_crash_signatures_before:
       $surfaceflinger_crash_signatures_before,
     surfaceflinger_crash_signatures_after:
       $surfaceflinger_crash_signatures_after,
+    accepted_audio_elements: $accepted_audio_elements,
+    wav_or_pcm_intermediary: false,
     audibility_claim: false
   }' > "$evidence/RUNTIME-GATE.json"

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "baseline_evidence": {
+    "run_id": 30374223297,
+    "source_sha": "5dfb64af5db86f5a838d7dfe77ea9ed373fb2dc8",
+    "assessment_sha256": "3593de10e5a2a000364639f1d115dd63f08844bb1d4e2541bc84fc6d17c21478",
+    "status": "GUEST_ANGLE_OFF_BOOT_RECOVERY_ON_SAME_HOST"
+  },
+  "emulator": {
+    "emulator_version": "37.2.1.0",
+    "emulator_revision": "37.2.1",
+    "emulator_build_id": 15875889,
+    "emulator_archive_sha1": "1c39ceb4bca042b973344d252a051189d367ab83",
+    "emulator_archive_sha256": "3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d",
+    "emulator_archive_size": 346539649
+  },
+  "profiles": {
+    "37": {
+      "page_size": 4096,
+      "system_image": "system-images;android-37.0;google_apis;x86_64",
+      "system_fingerprint": "google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys",
+      "system_image_manifest_sha256": "6101433b6057b1045d357308d27769f0ba1b80c4698ca5c3e5ce5a08f5b93eb3"
+    },
+    "37-16k": {
+      "page_size": 16384,
+      "system_image": "system-images;android-37.0;google_apis_ps16k;x86_64",
+      "system_fingerprint": "google/sdk_gphone16k_x86_64/emu64xa16k:17/CE2A.260420.019/15611780:userdebug/dev-keys",
+      "system_image_manifest_sha256": "29f5534a4fb8a36356f96ffb300a4ef66b6cb573474a8ba12538fdb0706db445"
+    }
+  }
+}
