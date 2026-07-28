@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      renderer_probe:
+        description: Run only the isolated Android 17 renderer matrix
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -24,6 +30,7 @@ env:
 jobs:
   android:
     name: Android API-26/API-37 application
+    if: github.event_name != 'workflow_dispatch' || inputs.renderer_probe != true
     runs-on: ubuntu-24.04
     timeout-minutes: 110
     steps:
@@ -306,8 +313,220 @@ jobs:
             echo "- Play-control evidence requires AudioTrack queue acceptance; it never claims audibility"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  android-renderer-probe:
+    name: Android 17 renderer / ${{ matrix.renderer }}
+    if: github.event_name == 'workflow_dispatch' && inputs.renderer_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer:
+          - swiftshader
+          - lavapipe
+          - swangle
+          - host
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Install exact Android 17 probe runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "system-images;android-37.0;google_apis;x86_64"
+          image="$ANDROID_HOME/system-images/android-37.0/google_apis/x86_64"
+          test -d "$image"
+          (
+            cd "$image"
+            printf '%s  %s\n' \
+              b43c39e789485027540a18777884a64adbb1b18a2756803a40b96ec1d1f8c745 package.xml \
+              4b8a752539c967c3959af6768c1e118a0e41b36b53dcf03a122a011725c14896 kernel-ranchu \
+              1a3822e981bd07308b48882d205e91e893eff40a27e566a84b597180f2ad426b ramdisk.img \
+              ca98470938276fbdf5501dfda3c276a5b43e32514900f2ceeec808bdc7711d17 system.img \
+              fb76b3cb619100e5d63f5147be982bb31afeb9beb726e82ce9239d295487ad9b vendor.img \
+              bf15b0b43bd0155b258b3756cf523dd917735042633edbb645b34c285a45832d source.properties \
+              7e0d7d2acf0ded1bc4b445356d93fd6759c99956620c4141cd63f7363c326149 advancedFeatures.ini \
+              9a7e1122391cf8e23674d8c293b81faa3be4163886c976a478864be062ffe5ba build.prop \
+              | sha256sum -c -
+          )
+          echo "ORKELA_IMAGE_HASHES_VERIFIED=true" >> "$GITHUB_ENV"
+
+          archive="$RUNNER_TEMP/emulator-linux_x64-15507667.zip"
+          pinned="$RUNNER_TEMP/android-emulator-36.6.11"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://dl.google.com/android/repository/emulator-linux_x64-15507667.zip"
+          printf '%s  %s\n' \
+            f8d8b83cf21a04966326eb1378bacda255f63b93 \
+            "$archive" \
+            | sha1sum -c -
+          expected_archive_sha256="1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830"
+          actual_archive_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
+          test "$actual_archive_sha256" = "$expected_archive_sha256"
+          mkdir -p "$pinned"
+          unzip -q "$archive" -d "$pinned"
+          emulator_bin="$pinned/emulator/emulator"
+          test -x "$emulator_bin"
+          test "$(
+            "$emulator_bin" -version 2>&1 \
+              | sed -n \
+                's/^Android emulator version \([^ ]*\).*/\1/p' \
+              | head -n 1
+          )" = "36.6.11"
+          echo "ORKELA_EMULATOR_BIN=$emulator_bin" >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_SHA256=$actual_archive_sha256" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_VERIFIED=true" >> "$GITHUB_ENV"
+          sudo chown "$(id -un)" /dev/kvm
+
+      - name: Probe renderer without installing Orkela
+        shell: bash
+        run: |
+          bash platform/android/ci/probe_renderer.sh \
+            "${{ matrix.renderer }}"
+
+      - name: Publish renderer evidence
+        if: always()
+        id: upload-probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-renderer-${{ matrix.renderer }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android37-renderer-probe/${{ matrix.renderer }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize renderer result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="build/android37-renderer-probe/${{ matrix.renderer }}/PROBE-RESULT.json"
+          test -s "$result"
+          {
+            echo "### Android 17 renderer: ${{ matrix.renderer }}"
+            echo "- Stable: $(jq -r .stable "$result")"
+            echo "- Stage-1 candidate: $(jq -r .stage1_candidate "$result")"
+            echo "- Known control crash: $(jq -r .known_control_crash_reproduced "$result")"
+            echo "- Effective renderer: $(jq -r .effective_renderer_line "$result")"
+            echo "- Exact environment: $(jq -r .environment_exact "$result")"
+            echo "- Healthy observations: $(jq -r .soak.healthy_observations "$result") / 24"
+            echo "- SurfaceFlinger PID changes: $(jq -r .soak.pid_changes "$result")"
+            echo "- Crash signatures: $(jq -r .soak.crash_signatures "$result")"
+            echo "- Valid screenshots: $(jq -r .soak.valid_screenshots "$result") / 4"
+            echo "- Artifact ID: ${{ steps.upload-probe.outputs.artifact-id }}"
+            echo "- Diagnostic only: no Orkela APK was installed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-renderer-assessment:
+    name: Android 17 renderer assessment
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.renderer_probe == true
+    needs:
+      - android-renderer-probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download every renderer result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Orkela-Android17-renderer-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-artifacts
+
+      - name: Reduce matrix into one evidence verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = sorted(
+              Path("probe-artifacts").glob("**/PROBE-RESULT.json")
+          )
+          if len(paths) != 4:
+              raise SystemExit(
+                  f"expected four renderer results, found {len(paths)}"
+              )
+          results = {}
+          for path in paths:
+              result = json.loads(path.read_text(encoding="utf-8"))
+              renderer = result["renderer"]
+              if renderer in results:
+                  raise SystemExit(f"duplicate renderer result: {renderer}")
+              results[renderer] = result
+          expected = {"swiftshader", "lavapipe", "swangle", "host"}
+          if set(results) != expected:
+              raise SystemExit(
+                  f"unexpected renderer set: {sorted(results)}"
+              )
+
+          control = results["swiftshader"]
+          control_reproduced = (
+              control["environment_exact"]
+              and control["crash_evidence_complete"]
+              and control["known_control_crash_reproduced"]
+              and control["known_failing_tuple"]
+              and control["effective_renderer_count"] == 1
+              and (
+                  "setCurrentRenderer: swiftshader swiftshader"
+                  in control["effective_renderer_line"]
+              )
+              and not control["stable"]
+          )
+          candidates = [
+              renderer
+              for renderer in ("lavapipe", "swangle")
+              if results[renderer]["stage1_candidate"]
+          ]
+          assessment = {
+              "schema": 1,
+              "control_reproduced": control_reproduced,
+              "stage1_candidates": candidates,
+              "host_is_diagnostic_only": True,
+              "results": results,
+          }
+          Path("ANDROID17-RENDERER-ASSESSMENT.json").write_text(
+              json.dumps(assessment, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          if not control_reproduced:
+              raise SystemExit(
+                  "swiftshader did not reproduce the exact known crash"
+              )
+          if not candidates:
+              raise SystemExit(
+                  "no deterministic renderer passed the Stage-1 gate"
+              )
+          PY
+          {
+            echo "## Android 17 renderer assessment"
+            echo "- Control crash reproduced: $(jq -r .control_reproduced ANDROID17-RENDERER-ASSESSMENT.json)"
+            echo "- Stage-1 candidates: $(jq -r '.stage1_candidates | join(\", \")' ANDROID17-RENDERER-ASSESSMENT.json)"
+            echo "- Next required gate: 3 cold 4K boots, then 3 cold 16K boots and the full Orkela APK gate"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload renderer assessment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-renderer-assessment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ANDROID17-RENDERER-ASSESSMENT.json
+          if-no-files-found: warn
+          retention-days: 14
+
   ios:
     name: iOS ${{ matrix.target }}
+    if: github.event_name != 'workflow_dispatch' || inputs.renderer_probe != true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
@@ -620,7 +839,7 @@ jobs:
 
   orkela-mobile-gate:
     name: orkela-mobile-gate
-    if: always()
+    if: always() && (github.event_name != 'workflow_dispatch' || inputs.renderer_probe != true)
     needs:
       - android
       - ios
