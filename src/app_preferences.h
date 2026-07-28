@@ -17,6 +17,10 @@ struct app_preferences {
     bool remember_volume = true;
     std::uint32_t skip_seconds = 10U;
     float volume = 0.85F;
+    // Zero follows the operating-system UI language. Values 1..9 select the
+    // corresponding entry in orkela::language without exposing codec state.
+    std::uint8_t interface_language = 0U;
+    std::uint8_t visual_mode = 0U;
     std::filesystem::path last_media;
     std::uint32_t last_frame = 0U;
 };

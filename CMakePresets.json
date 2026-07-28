@@ -40,6 +40,47 @@
         "CMAKE_OSX_ARCHITECTURES": "x86_64",
         "CMAKE_OSX_SYSROOT": "iphonesimulator"
       }
+    },
+    {
+      "name": "ios-simulator-arm64",
+      "displayName": "Orkela iOS simulator ARM64",
+      "inherits": "ios-common",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator"
+      }
+    },
+    {
+      "name": "macos-common",
+      "hidden": true,
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+        "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED": "NO",
+        "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED": "NO",
+        "ORKELA_BUILD_APPLICATIONS": "ON",
+        "ORKELA_WARNINGS_AS_ERRORS": "ON",
+        "RESONITH_BUILD_SHARED": "OFF",
+        "RESONITH_BUILD_TOOLS": "OFF",
+        "RESONITH_BUILD_FUZZERS": "OFF"
+      }
+    },
+    {
+      "name": "macos-arm64",
+      "displayName": "Orkela macOS ARM64",
+      "inherits": "macos-common",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "macos-x86_64",
+      "displayName": "Orkela macOS x86-64",
+      "inherits": "macos-common",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      }
     }
   ],
   "buildPresets": [
@@ -58,6 +99,33 @@
       "configuration": "Release",
       "targets": [
         "OrkelaIOS"
+      ],
+      "jobs": 4
+    },
+    {
+      "name": "ios-simulator-arm64",
+      "configurePreset": "ios-simulator-arm64",
+      "configuration": "Release",
+      "targets": [
+        "OrkelaIOS"
+      ],
+      "jobs": 4
+    },
+    {
+      "name": "macos-arm64",
+      "configurePreset": "macos-arm64",
+      "configuration": "Release",
+      "targets": [
+        "OrkelaMac"
+      ],
+      "jobs": 4
+    },
+    {
+      "name": "macos-x86_64",
+      "configurePreset": "macos-x86_64",
+      "configuration": "Release",
+      "targets": [
+        "OrkelaMac"
       ],
       "jobs": 4
     }

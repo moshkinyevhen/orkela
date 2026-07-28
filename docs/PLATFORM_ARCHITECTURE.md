@@ -2,7 +2,7 @@
 
 Status: **ACCEPTED**
 
-## One player, three native products
+## One player, seven native products
 
 Orkela is not three independent ports. The product is split at the narrowest
 stable boundary:
@@ -19,9 +19,27 @@ size and improves accessibility or power behavior.
 
 | Platform | UI/lifecycle | Audio output | Required artifact |
 |---|---|---|---|
-| Windows x64 | C++23 + Win32/Direct2D | Windows multimedia; WASAPI planned | `Orkela.exe` |
+| Windows x64/ARM64 | C++23 + Win32/Direct2D | Windows multimedia; WASAPI planned | `Orkela.exe` |
 | Android ARM64/x86-64 | Java 17 shell + C++23 JNI | streaming `AudioTrack` | APK/AAB |
 | iOS ARM64/x86-64 simulator | Objective-C++23 + UIKit | `AVAudioEngine` | unsigned CI `.app`; signed archive at release |
+| macOS ARM64/x86-64 | Objective-C++23 + AppKit | `AVAudioEngine` | `.app` / signed update archive |
+| Ubuntu | C++23 + GTK4 | direct PCM through GStreamer | Debian package / tar archive |
+| Debian | C++23 + GTK4 | direct PCM through GStreamer | Debian package / tar archive |
+| FreeBSD | C++23 + GTK4 | direct PCM through GStreamer | package / tar archive |
+
+All shells consume the same fixed-dimension `pcm_visual_analyzer` for Field,
+Spectrum, Wave, and accumulating multiresolution History. Rendering remains
+native. CUDA, toolkit tiles, and display refresh do not define analytical
+boundaries.
+
+All shells also consume the same nine-language catalog. System-locale routing
+and the persistent manual Settings override are specified in
+`INTERFACE_LOCALIZATION.md`.
+
+Installation and updates are a separate trust boundary. Native package types,
+signed metadata, store authority, rollback, and the rule that unsigned CI
+archives are not product installers are specified in
+`UPDATE_AND_PACKAGING.md`.
 
 ## Portable C++23 subset
 
@@ -62,9 +80,13 @@ Beginning with the 0.3 mobile line, every promoted Orkela playback revision
 must build from one commit as:
 
 - Windows x64;
+- Windows ARM64;
 - Android ARM64 and x86-64 in one package;
 - iOS device ARM64;
-- iOS simulator x86-64.
+- iOS simulator x86-64 and ARM64;
+- macOS ARM64 and x86-64;
+- Ubuntu and Debian;
+- FreeBSD.
 
 A successful library compile is not a player result. The release report must
 separately record package creation, native architecture, direct Resonith
@@ -79,7 +101,7 @@ runner; Windows cannot substitute for the Apple SDK or signing service.
 | C++ language | C++23 |
 | Android Gradle Plugin | 9.2.1 |
 | Gradle | 9.4.1 |
-| Android compile/target SDK | 36 |
+| Android compile/target SDK | 37 |
 | Android minimum API | 26 |
 | Android NDK | r29 (`29.0.14206865`) |
 | Android Clang | 21 |

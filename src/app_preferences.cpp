@@ -110,6 +110,12 @@ app_preferences load_preferences() {
         read_uint(path, L"VolumePercent", 85U)
     );
     result.volume = static_cast<float>(volume_percent) / 100.0F;
+    result.interface_language = static_cast<std::uint8_t>(
+        std::min(9U, read_uint(path, L"InterfaceLanguage", 0U))
+    );
+    result.visual_mode = static_cast<std::uint8_t>(
+        std::min(3U, read_uint(path, L"VisualMode", 0U))
+    );
     result.last_media = read_text(path, L"LastMedia");
     result.last_frame = read_uint(path, L"LastFrame", 0U);
     return result;
@@ -160,6 +166,16 @@ void save_preferences(const app_preferences& preferences) noexcept {
             std::clamp(preferences.volume, 0.0F, 1.0F) * 100.0F + 0.5F
         );
         write_text(path, L"VolumePercent", std::to_wstring(volume_percent));
+        write_text(
+            path,
+            L"InterfaceLanguage",
+            std::to_wstring(preferences.interface_language)
+        );
+        write_text(
+            path,
+            L"VisualMode",
+            std::to_wstring(preferences.visual_mode)
+        );
         write_text(path, L"LastMedia", preferences.last_media.wstring());
         write_text(path, L"LastFrame", std::to_wstring(preferences.last_frame));
     } catch (...) {

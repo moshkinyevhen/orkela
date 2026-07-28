@@ -2,6 +2,7 @@
 #define ORKELA_DECODED_AUDIO_H
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace orkela {
@@ -10,6 +11,12 @@ struct decoded_audio {
     std::uint32_t sample_rate = 0U;
     std::uint16_t channels = 0U;
     std::uint32_t frame_count = 0U;
+    /*
+     * Optional authenticated source used by the desktop streaming player.
+     * `samples` then contains only a bounded visualization preview, never an
+     * implicit full-track PCM cache.
+     */
+    std::shared_ptr<const std::vector<std::uint8_t>> source_bytes;
     std::vector<std::int16_t> samples;
 };
 

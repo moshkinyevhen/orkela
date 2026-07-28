@@ -1,79 +1,242 @@
-name: Release
+name: Publish Validated Alpha
 
 on:
-  push:
-    tags:
-      - "v*"
-      - "orkela-ci-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v0.3.0-alpha.6
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-2022
+  publish:
+    name: Assemble exact validated artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out the requested immutable tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
 
-      - name: Configure
-        run: cmake -S . -B build -A x64
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Package
-        shell: pwsh
+      - name: Verify tag, version, and source identity
+        id: identity
+        shell: bash
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
-          $package = "Orkela-Windows-x64-$version"
-          New-Item -ItemType Directory -Path "out/$package"
-          Copy-Item build/Release/Orkela.exe "out/$package/Orkela.exe"
-          Copy-Item tools/Register-Orkela.ps1 "out/$package/Register-Orkela.ps1"
-          Copy-Item README.md,CHANGELOG.md,VERSION "out/$package/"
-          Copy-Item samples "out/$package/samples" -Recurse
-          Compress-Archive `
-            -Path "out/$package/*" `
-            -DestinationPath "out/$package.zip" `
-            -CompressionLevel Optimal
-          Get-FileHash "out/$package/Orkela.exe","out/$package.zip" `
-            -Algorithm SHA256 |
-            ForEach-Object {
-              "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))"
-            } |
-            Set-Content "out/$package-SHA256SUMS.txt" -Encoding ascii
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          expected="v$version"
+          test "${{ inputs.tag }}" = "$expected"
+          source_sha="$(git rev-parse HEAD)"
+          test -n "$source_sha"
+          {
+            echo "version=$version"
+            echo "source_sha=$source_sha"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Publish validation or versioned prerelease
-        shell: pwsh
+      - name: Locate successful required workflows for this commit
+        id: runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          successful_run() {
+            local workflow="$1"
+            local result
+            result="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow" \
+                --commit "$SOURCE_SHA" \
+                --limit 20 \
+                --json databaseId,status,conclusion,createdAt \
+                --jq '
+                  [
+                    .[]
+                    | select(
+                        .status == "completed"
+                        and .conclusion == "success"
+                      )
+                  ]
+                  | sort_by(.createdAt)
+                  | last
+                  | .databaseId // empty
+                '
+            )"
+            test -n "$result"
+            printf '%s' "$result"
+          }
+
+          windows="$(successful_run windows.yml)"
+          desktop="$(successful_run desktop-unix.yml)"
+          mobile="$(successful_run mobile.yml)"
+          {
+            echo "windows=$windows"
+            echo "desktop=$desktop"
+            echo "mobile=$mobile"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download only product artifacts
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
-          $package = "Orkela-Windows-x64-$version"
-          $validation = "${{ startsWith(github.ref_name, 'orkela-ci-') }}"
-          if ($validation -eq "true") {
-            $title = "Orkela CI validation ${{ github.sha }}"
-            $notes = @"
-          Automated validation build. This is not a versioned product release.
+          set -euo pipefail
+          mkdir -p gathered/windows gathered/desktop gathered/mobile
 
-          Source commit: `${{ github.sha }}`
-          Declared candidate version: `$version`
-          "@
-          } else {
-            if ("v$version" -ne "${{ github.ref_name }}") {
-              throw "Tag ${{ github.ref_name }} does not match VERSION $version"
-            }
-            $title = "Orkela $version"
-            $notes = @"
-          Native Windows x64 prerelease of Orkela.
+          gh run download "${{ steps.runs.outputs.windows }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Orkela-Windows-*' \
+            --dir gathered/windows
 
-          Source commit: `${{ github.sha }}`
-          See `CHANGELOG.md` and the versioned release-evidence report.
-          "@
-          }
-          gh release create "${{ github.ref_name }}" `
-            "out/$package/Orkela.exe" `
-            "out/$package.zip" `
-            "out/$package-SHA256SUMS.txt" `
-            --title $title `
-            --notes $notes `
-            --prerelease
+          for pattern in \
+            'Orkela-Ubuntu-*' \
+            'Orkela-Debian-*' \
+            'Orkela-FreeBSD-*' \
+            'Orkela-macOS-*'
+          do
+            gh run download "${{ steps.runs.outputs.desktop }}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$pattern" \
+              --dir gathered/desktop
+          done
+
+          gh run download "${{ steps.runs.outputs.mobile }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Orkela-product-Android-*' \
+            --dir gathered/mobile
+
+      - name: Flatten artifacts and reject collisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          source = Path("gathered")
+          target = Path("release-assets")
+          target.mkdir()
+          for path in sorted(source.rglob("*")):
+              if not path.is_file():
+                  continue
+              destination = target / path.name
+              if destination.exists():
+                  raise SystemExit(
+                      f"duplicate release filename: {destination.name}"
+                  )
+              shutil.copy2(path, destination)
+          PY
+
+          version="${{ steps.identity.outputs.version }}"
+          required=(
+            "Orkela-Windows-x64-$version-Setup.exe"
+            "Orkela-Windows-arm64-$version-Setup.exe"
+            "Orkela-Ubuntu-24.04-amd64-$version.deb"
+            "Orkela-Debian-13-amd64-$version.deb"
+            "Orkela-FreeBSD-14-amd64-$version.pkg"
+            "Orkela-macOS-arm64-$version.pkg"
+            "Orkela-macOS-x86_64-$version.pkg"
+          )
+          for artifact in "${required[@]}"; do
+            test -s "release-assets/$artifact"
+          done
+          find release-assets -maxdepth 1 -type f -name \
+            'Orkela-Android-*.tar.gz' -print -quit | grep -q .
+
+      - name: Generate hashes and explicitly unsigned update metadata
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.identity.outputs.version }}"
+          base_url="$(
+            printf \
+              'https://github.com/%s/releases/download/%s' \
+              "$GITHUB_REPOSITORY" \
+              "${{ inputs.tag }}"
+          )"
+          android="$(
+            find release-assets -maxdepth 1 -type f \
+              -name 'Orkela-Android-*.tar.gz' -print -quit
+          )"
+
+          python3 tools/release/generate_update_manifest.py \
+            --version-file VERSION \
+            --channel beta \
+            --commit "$SOURCE_SHA" \
+            --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --base-url "$base_url" \
+            --artifact \
+              "release-assets/Orkela-Windows-x64-$version-Setup.exe:windows:x64:installer" \
+            --artifact \
+              "release-assets/Orkela-Windows-arm64-$version-Setup.exe:windows:arm64:installer" \
+            --artifact \
+              "release-assets/Orkela-Ubuntu-24.04-amd64-$version.deb:ubuntu:x64:deb" \
+            --artifact \
+              "release-assets/Orkela-Debian-13-amd64-$version.deb:debian:x64:deb" \
+            --artifact \
+              "release-assets/Orkela-FreeBSD-14-amd64-$version.pkg:freebsd:x64:pkg" \
+            --artifact \
+              "release-assets/Orkela-macOS-arm64-$version.pkg:macos:arm64:pkg" \
+            --artifact \
+              "release-assets/Orkela-macOS-x86_64-$version.pkg:macos:x86_64:pkg" \
+            --artifact "$android:android:multi:tested-debug-bundle" \
+            --output release-assets/orkela-update-v1.unsigned.json
+
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f \
+              ! -name SHA256SUMS \
+              -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+          )
+
+      - name: Publish immutable prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ inputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+          then
+            echo "Release ${{ inputs.tag }} already exists; refusing overwrite"
+            exit 1
+          fi
+
+          cat > release-notes.md <<EOF
+          Orkela ${{ steps.identity.outputs.version }} validated alpha.
+
+          Source commit: \`${{ steps.identity.outputs.source_sha }}\`
+
+          The Windows, Ubuntu, Debian, FreeBSD, macOS, and Android artifacts
+          were collected only from successful required workflows for this
+          exact commit. See \`CHANGELOG.md\` and the release-evidence reports.
+
+          This alpha is not an authenticated automatic-update channel.
+          \`orkela-update-v1.unsigned.json\` is transparent release metadata,
+          not an executable trust root. Stable updates remain disabled until
+          protected Ed25519, Authenticode, Developer ID, and store signing are
+          configured.
+          EOF
+
+          mapfile -d '' assets < <(
+            find release-assets -maxdepth 1 -type f -print0 | sort -z
+          )
+          gh release create "${{ inputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Orkela ${{ steps.identity.outputs.version }}" \
+            --notes-file release-notes.md \
+            --prerelease \
+            "${assets[@]}"

@@ -1,11 +1,11 @@
 # Orkela
 
 Orkela is a native media player for the SceneLith ecosystem. It plays real
-**Resonith** audio on Windows, Android, and iOS by calling the public Resonith
-Core decoder and sending reconstructed PCM directly to the operating system's
-audio API.
+**Resonith** audio on Windows, Android, iOS, macOS, Ubuntu, Debian, and
+FreeBSD by calling the public Resonith Core decoder and sending reconstructed
+PCM directly to the platform audio path.
 
-Current candidate version: **0.3.0-alpha.3**.
+Current candidate version: **0.3.0-alpha.6**.
 
 `.resonith file -> Resonith Core -> PCM16 -> Windows audio`
 
@@ -35,20 +35,34 @@ an unavailable decoder.
 ## Current milestone
 
 - shared strict C++23 session/core with native platform shells;
+- shared nine-language interface catalog with automatic system-locale
+  selection and a persistent manual override inside Settings;
+- shared fixed-memory Field, Spectrum, Wave, and multiresolution History
+  analyzer with native rendering on each platform;
 - DPI-aware Direct2D/DirectWrite interface with a PCM-derived spectrum;
 - open, play/pause, stop, seek, skip, volume, keyboard controls, and
   file drag-and-drop;
 - direct LPS4/LPS5 preflight and decoding through Resonith Core;
 - direct bounded `MFT1` execution through Resonith Core, including immutable
   Basis placement, circular alignment, and reverse instances;
+- direct composite `RSC1` MAF Truth playback (`MFT1` prediction plus `MRI1`
+  innovation) with saturating deterministic reconstruction;
 - pinned bounded MAF DSP Core revision `9f7650b`, including deterministic
   periodic, source-filter, stochastic, transient, Innovation, and mix
   operations beneath the existing admitted transport;
-- responsive background preflight/decode for long-form media;
+- sub-second reference-system load and first-audio latency for the complete
+  400.773-second Mozart anchors;
+- bounded four-buffer Windows playback fed directly by the Resonith pull
+  decoder instead of a complete predecoded PCM allocation;
 - mono and stereo PCM16 output through the Windows multimedia device;
 - no runtime network access and no external codec process.
 
-The first Android APK and iOS application bundle now share the same
+The Android application has a compatibility floor of Android 8 / API 26 and
+compiles and targets Android 17 / API 37. Release CI installs the same exact
+APK on API 26 and API 37 with 4 KiB pages and on API 37 with 16 KiB pages. Each
+runtime must reproduce the pinned PCM16 SHA-256 without a WAV intermediary.
+The Android APK and iOS
+application bundle share the same
 allocation-bounded Resonith pull session. Android streams packet PCM through
 JNI to `AudioTrack`; iOS performs background decode and schedules PCM through
 `AVAudioEngine`. See
@@ -61,10 +75,26 @@ and same-revision Windows/mobile CI are recorded in the
 [0.3.0-alpha.2 Player Gate](docs/results/BOUNDED_MAF_PLAYER_2026-07-27.md).
 The direct typed-MAF playback addition is recorded in the
 [0.3.0-alpha.3 MFT1 Gate](docs/results/MFT1_PLAYER_GATE_2026-07-27.md).
+Composite playback and the long-track startup fix are recorded in the
+[0.3.0-alpha.4 Streaming Gate](docs/results/RSC1_STREAMING_PLAYER_GATE_2026-07-27.md).
+The first physical-device compile/target API-37 result is recorded in the
+[Android 17 Boundary Gate](docs/results/ANDROID_17_BOUNDARY_GATE_2026-07-28.md);
+the repeatable API-26/API-37 GitHub boundary matrix remains release-blocking.
+The premium Android surface, direct external-stream launch, four live PCM
+views, physical-device transport checks, and exact final-APK fingerprint are
+recorded in the
+[Android Premium Visual Gate](docs/results/ANDROID_PREMIUM_VISUALS_ALPHA5_2026-07-28.md).
 
-This milestone decodes a complete research clip into bounded application
-memory before playback. Streaming decode, playlists, mobile front ends, and
-SceneLith video are subsequent milestones.
+The accepted interface-language behavior is defined in the
+[Interface Localization Contract](docs/INTERFACE_LOCALIZATION.md). The
+supported languages are English, German, Spanish, Italian, Japanese, Korean,
+Simplified Chinese, Russian, and Ukrainian. Language follows the operating
+system by default; the only manual selector is under
+**Settings → Interface → Language**.
+
+This milestone authenticates a complete stream before playback but synthesizes
+PCM into a bounded platform queue only as time advances. Playlists, the media
+library, and SceneLith video remain subsequent milestones.
 
 ## Release evidence
 
@@ -78,6 +108,10 @@ Each published improvement updates [`CHANGELOG.md`](CHANGELOG.md) and
 [`VERSION`](VERSION). The local package and GitHub release must identify the
 same semantic version, source commit, filenames, and SHA-256 hashes. See
 [Release Evidence Protocol](docs/RELEASE_EVIDENCE.md).
+
+Portable archives and installable products are intentionally distinct.
+The cross-platform installer, store, and signed update contract is documented
+in [Update and Packaging](docs/UPDATE_AND_PACKAGING.md).
 
 The release-blocking next product milestone is the
 [Premium Command Center](docs/PRODUCT_ROADMAP.md): icon-led navigation,
@@ -106,6 +140,11 @@ cd platform/android
 .\gradlew.bat :app:assembleDebug
 ```
 
+The build requires Android SDK Platform 37 and Build-Tools 37.0.0. NDK r29
+provides the native 16 KiB page-size baseline. The APK still runs from API 26
+upward; raising the compile/target level does not raise the minimum supported
+runtime.
+
 For a local unpublished Resonith integration checkout, set
 `ORKELA_RESONITH_SOURCE_DIR` before invoking Gradle. Public and CI builds omit
 that variable and use the immutable Resonith revision pinned by CMake.
@@ -117,6 +156,21 @@ simulator bundles are built by the checked-in CMake presets on macOS/Xcode:
 ```bash
 cmake --preset ios-simulator-x86_64
 cmake --build --preset ios-simulator-x86_64
+```
+
+macOS uses the matching native AppKit presets:
+
+```bash
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64
+```
+
+Ubuntu, Debian, and FreeBSD use GTK4 for the shell and GStreamer for direct
+PCM output:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
 The executable is `build/Release/Orkela.exe`. To register the three canonical

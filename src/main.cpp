@@ -2,6 +2,9 @@
 #include "resonith_file.h"
 #include "wave_player.h"
 
+#include "orkela/localization.h"
+#include "orkela/visual_analysis.h"
+
 #include "../resources/resource.h"
 
 #include <commdlg.h>
@@ -24,8 +27,8 @@
 #include <cwctype>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <memory>
-#include <numbers>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -38,10 +41,11 @@ using Microsoft::WRL::ComPtr;
 
 constexpr UINT playback_done_message = WM_APP + 1U;
 constexpr UINT decode_done_message = WM_APP + 2U;
+constexpr UINT waveform_done_message = WM_APP + 3U;
 constexpr UINT animation_timer_id = 1U;
 constexpr UINT animation_interval_ms = 16U;
 constexpr float design_dpi = 96.0F;
-constexpr std::size_t spectrum_bar_count = 24U;
+constexpr std::size_t scope_column_count = 320U;
 constexpr std::size_t command_page_count = 12U;
 
 enum class command_page : std::size_t {
@@ -69,6 +73,11 @@ struct decode_payload {
     std::filesystem::path path;
     std::shared_ptr<const orkela::decoded_audio> audio;
     std::wstring error;
+};
+
+struct waveform_payload {
+    std::uint64_t generation = 0U;
+    std::vector<float> waveform;
 };
 
 struct visual_layout {
@@ -145,12 +154,19 @@ struct app_state {
     std::shared_ptr<const orkela::decoded_audio> audio;
     orkela::wave_player player;
     std::vector<float> waveform;
-    std::array<float, spectrum_bar_count> spectrum{};
+    std::vector<std::int16_t> visual_pcm;
+    std::array<float, scope_column_count> scope_low{};
+    std::array<float, scope_column_count> scope_high{};
+    orkela::pcm_visual_analyzer visual_analyzer;
+    orkela::visual_snapshot visual;
+    orkela::visual_mode visual_mode = orkela::visual_mode::field;
     orkela::app_preferences preferences;
     std::wstring format_name = L"NO MEDIA";
     std::wstring status =
         L"Drop a .resonith file here or choose Open media.";
     std::uint32_t cursor_frame = 0U;
+    std::uint32_t last_visual_start =
+        std::numeric_limits<std::uint32_t>::max();
     std::uint64_t playback_generation = 0U;
     std::uint64_t decode_generation = 0U;
     std::uint32_t animation_tick = 0U;
@@ -166,6 +182,107 @@ struct app_state {
     bool command_focus_actions = false;
     std::atomic_bool closing{false};
 };
+
+std::wstring wide_from_utf8(std::string_view value) {
+    if (value.empty()) {
+        return {};
+    }
+    const int length = MultiByteToWideChar(
+        CP_UTF8,
+        MB_ERR_INVALID_CHARS,
+        value.data(),
+        static_cast<int>(value.size()),
+        nullptr,
+        0
+    );
+    if (length <= 0) {
+        return {};
+    }
+    std::wstring result(static_cast<std::size_t>(length), L'\0');
+    MultiByteToWideChar(
+        CP_UTF8,
+        MB_ERR_INVALID_CHARS,
+        value.data(),
+        static_cast<int>(value.size()),
+        result.data(),
+        length
+    );
+    return result;
+}
+
+orkela::language system_interface_language() noexcept {
+    switch (PRIMARYLANGID(GetUserDefaultUILanguage())) {
+    case LANG_GERMAN:
+        return orkela::language::german;
+    case LANG_SPANISH:
+        return orkela::language::spanish;
+    case LANG_ITALIAN:
+        return orkela::language::italian;
+    case LANG_JAPANESE:
+        return orkela::language::japanese;
+    case LANG_KOREAN:
+        return orkela::language::korean;
+    case LANG_CHINESE:
+        return orkela::language::chinese_simplified;
+    case LANG_RUSSIAN:
+        return orkela::language::russian;
+    case LANG_UKRAINIAN:
+        return orkela::language::ukrainian;
+    default:
+        return orkela::language::english;
+    }
+}
+
+orkela::language interface_language(const app_state* state) noexcept {
+    if (
+        state == nullptr
+        || state->preferences.interface_language == 0U
+    ) {
+        return system_interface_language();
+    }
+    const std::uint8_t index =
+        static_cast<std::uint8_t>(state->preferences.interface_language - 1U);
+    return static_cast<orkela::language>(
+        std::min<std::uint8_t>(
+            index,
+            static_cast<std::uint8_t>(
+                orkela::supported_language_count - 1U
+            )
+        )
+    );
+}
+
+std::wstring localized(const app_state* state, orkela::text_id id) {
+    return wide_from_utf8(
+        orkela::localized_text(interface_language(state), id)
+    );
+}
+
+std::wstring selected_language_name(const app_state* state) {
+    if (
+        state == nullptr
+        || state->preferences.interface_language == 0U
+    ) {
+        return localized(state, orkela::text_id::system_default);
+    }
+    return wide_from_utf8(
+        orkela::language_autonym(interface_language(state))
+    );
+}
+
+orkela::text_id visual_mode_text_id(orkela::visual_mode mode) noexcept {
+    switch (mode) {
+    case orkela::visual_mode::field:
+        return orkela::text_id::field;
+    case orkela::visual_mode::spectrum:
+        return orkela::text_id::spectrum;
+    case orkela::visual_mode::wave:
+        return orkela::text_id::wave;
+    case orkela::visual_mode::history:
+        return orkela::text_id::history;
+    }
+    return orkela::text_id::field;
+}
 
 bool contains(const D2D1_RECT_F& rectangle, D2D1_POINT_2F point) noexcept {
     return point.x >= rectangle.left
@@ -360,14 +477,25 @@ std::vector<float> build_waveform(const orkela::decoded_audio& audio) {
         return result;
     }
 
+    const std::size_t preview_frames =
+        audio.samples.size() / audio.channels;
+    if (preview_frames == 0U) {
+        return result;
+    }
     for (std::size_t column = 0U; column < column_count; ++column) {
         const std::uint64_t begin =
             static_cast<std::uint64_t>(column) * audio.frame_count
             / column_count;
+        if (begin >= preview_frames) {
+            continue;
+        }
         const std::uint64_t end = std::max<std::uint64_t>(
             begin + 1U,
-            static_cast<std::uint64_t>(column + 1U) * audio.frame_count
-                / column_count
+            std::min<std::uint64_t>(
+                preview_frames,
+                static_cast<std::uint64_t>(column + 1U)
+                    * audio.frame_count / column_count
+            )
         );
         std::int32_t peak = 0;
         for (std::uint64_t frame = begin; frame < end; ++frame) {
@@ -404,72 +532,156 @@ void update_spectrum(app_state* state) {
     if (
         state == nullptr
         || state->audio == nullptr
-        || state->audio->samples.empty()
         || state->audio->frame_count == 0U
         || state->audio->sample_rate == 0U
+        || state->audio->channels == 0U
     ) {
         return;
     }
 
-    constexpr std::size_t window = 256U;
     const auto& audio = *state->audio;
-    const std::uint32_t center = std::min(
-        state->cursor_frame,
-        audio.frame_count - 1U
-    );
-    const std::uint32_t begin =
-        center > window / 2U
-            ? center - static_cast<std::uint32_t>(window / 2U)
-            : 0U;
+    const std::int16_t* samples = audio.samples.data();
+    std::size_t sample_elements = audio.samples.size();
+    std::uint32_t snapshot_start = 0U;
+    std::uint16_t snapshot_channels = audio.channels;
+    if (!state->visual_pcm.empty()) {
+        const std::size_t live_elements =
+            state->player.copy_visual_snapshot(
+                state->visual_pcm,
+                &snapshot_start,
+                &snapshot_channels
+            );
+        if (
+            snapshot_channels != 0U
+            && live_elements >= snapshot_channels
+            && snapshot_channels == audio.channels
+        ) {
+            samples = state->visual_pcm.data();
+            sample_elements = live_elements;
+        } else {
+            snapshot_start = 0U;
+            snapshot_channels = audio.channels;
+        }
+    }
+    const std::size_t snapshot_frames =
+        sample_elements / snapshot_channels;
+    if (snapshot_frames == 0U) {
+        return;
+    }
 
-    for (std::size_t band = 0U; band < spectrum_bar_count; ++band) {
-        const double ratio = static_cast<double>(band)
-            / static_cast<double>(spectrum_bar_count - 1U);
-        const double frequency = 45.0 * std::pow(18000.0 / 45.0, ratio);
-        double real = 0.0;
-        double imaginary = 0.0;
-        for (std::size_t index = 0U; index < window; ++index) {
-            const std::uint64_t frame =
-                static_cast<std::uint64_t>(begin) + index;
-            if (frame >= audio.frame_count) {
-                break;
-            }
-            double sample = 0.0;
+    for (std::size_t column = 0U; column < scope_column_count; ++column) {
+        const std::size_t local_begin =
+            column * snapshot_frames / scope_column_count;
+        const std::size_t local_end = std::max<std::size_t>(
+            local_begin + 1U,
+            (column + 1U) * snapshot_frames / scope_column_count
+        );
+        float low = 1.0F;
+        float high = -1.0F;
+        for (
+            std::size_t frame = local_begin;
+            frame < std::min(local_end, snapshot_frames);
+            ++frame
+        ) {
+            std::int32_t mixed = 0;
             for (
                 std::uint16_t channel = 0U;
-                channel < audio.channels;
+                channel < snapshot_channels;
                 ++channel
             ) {
-                sample += audio.samples[
-                    static_cast<std::size_t>(frame) * audio.channels
-                    + channel
-                ];
+                mixed += samples[frame * snapshot_channels + channel];
             }
-            sample /= static_cast<double>(audio.channels) * 32768.0;
-            const double hann = 0.5 - 0.5 * std::cos(
-                2.0 * std::numbers::pi * static_cast<double>(index)
-                / static_cast<double>(window - 1U)
-            );
-            const double phase =
-                2.0 * std::numbers::pi * frequency
-                * static_cast<double>(index)
-                / static_cast<double>(audio.sample_rate);
-            real += sample * hann * std::cos(phase);
-            imaginary -= sample * hann * std::sin(phase);
+            const float value = static_cast<float>(mixed)
+                / (
+                    static_cast<float>(snapshot_channels)
+                    * 32768.0F
+                );
+            low = std::min(low, value);
+            high = std::max(high, value);
         }
-        const float raw = std::clamp(
-            static_cast<float>(
-                std::log1p(
-                    18.0 * std::sqrt(real * real + imaginary * imaginary)
-                    / static_cast<double>(window)
-                )
-            ),
-            0.0F,
-            1.0F
-        );
-        state->spectrum[band] =
-            0.78F * state->spectrum[band] + 0.22F * raw;
+        state->scope_low[column] = std::clamp(low, -1.0F, 1.0F);
+        state->scope_high[column] = std::clamp(high, -1.0F, 1.0F);
     }
+
+    const std::uint32_t snapshot_end = snapshot_start
+        + static_cast<std::uint32_t>(snapshot_frames);
+    if (!state->waveform.empty() && audio.frame_count != 0U) {
+        const std::size_t first_column = std::min<std::size_t>(
+            state->waveform.size() - 1U,
+            static_cast<std::uint64_t>(snapshot_start)
+                * state->waveform.size() / audio.frame_count
+        );
+        const std::size_t last_column = std::min<std::size_t>(
+            state->waveform.size() - 1U,
+            static_cast<std::uint64_t>(snapshot_end - 1U)
+                * state->waveform.size() / audio.frame_count
+        );
+        for (
+            std::size_t column = first_column;
+            column <= last_column;
+            ++column
+        ) {
+            const std::uint32_t global_begin = std::max<std::uint32_t>(
+                snapshot_start,
+                static_cast<std::uint32_t>(
+                    static_cast<std::uint64_t>(column) * audio.frame_count
+                        / state->waveform.size()
+                )
+            );
+            const std::uint32_t global_end = std::min<std::uint32_t>(
+                snapshot_end,
+                std::max<std::uint32_t>(
+                    global_begin + 1U,
+                    static_cast<std::uint32_t>(
+                        static_cast<std::uint64_t>(column + 1U)
+                            * audio.frame_count / state->waveform.size()
+                    )
+                )
+            );
+            std::int32_t peak = 0;
+            for (
+                std::uint32_t frame = global_begin;
+                frame < global_end;
+                ++frame
+            ) {
+                std::int32_t mixed = 0;
+                const std::size_t local = frame - snapshot_start;
+                for (
+                    std::uint16_t channel = 0U;
+                    channel < snapshot_channels;
+                    ++channel
+                ) {
+                    mixed += std::abs(
+                        static_cast<std::int32_t>(
+                            samples[
+                                local * snapshot_channels + channel
+                            ]
+                        )
+                    );
+                }
+                peak = std::max(
+                    peak,
+                    mixed / static_cast<std::int32_t>(snapshot_channels)
+                );
+            }
+            state->waveform[column] = std::max(
+                state->waveform[column],
+                static_cast<float>(peak) / 32768.0F
+            );
+        }
+    }
+
+    if (snapshot_start != state->last_visual_start) {
+        static_cast<void>(
+            state->visual_analyzer.offer(
+                std::span<const std::int16_t>(samples, sample_elements),
+                snapshot_channels,
+                audio.sample_rate
+            )
+        );
+        state->last_visual_start = snapshot_start;
+    }
+    state->visual = state->visual_analyzer.snapshot();
 }
 
 HRESULT create_text_format(
@@ -901,49 +1113,78 @@ struct command_tile_view {
     bool visible = false;
 };
 
-const std::array<std::wstring, command_page_count> command_navigation = {
-    L"✦  Overview",
-    L"▶  Playback",
-    L"◉  Audio",
-    L"▥  Visuals",
-    L"▣  Video",
-    L"CC  Subtitles",
-    L"≡  Library",
-    L"◇  Interface",
-    L"⚡  Performance",
-    L"◆  Privacy",
-    L"⌘  Hotkeys",
-    L"⚙  Advanced",
+constexpr std::array<std::wstring_view, command_page_count>
+    command_navigation_icons = {
+    L"✦  ",
+    L"▶  ",
+    L"◉  ",
+    L"▥  ",
+    L"▣  ",
+    L"CC  ",
+    L"≡  ",
+    L"◇  ",
+    L"⚡  ",
+    L"◆  ",
+    L"⌘  ",
+    L"⚙  ",
 };
 
-std::wstring command_page_title(command_page page) {
+constexpr std::array<orkela::text_id, command_page_count>
+    command_navigation_text = {
+    orkela::text_id::overview,
+    orkela::text_id::playback,
+    orkela::text_id::audio,
+    orkela::text_id::visuals,
+    orkela::text_id::video,
+    orkela::text_id::subtitles,
+    orkela::text_id::library,
+    orkela::text_id::interface_settings,
+    orkela::text_id::performance,
+    orkela::text_id::privacy,
+    orkela::text_id::hotkeys,
+    orkela::text_id::advanced,
+};
+
+std::wstring command_navigation_label(
+    const app_state* state,
+    std::size_t index
+) {
+    return std::wstring(command_navigation_icons[index])
+        + localized(state, command_navigation_text[index]);
+}
+
+std::wstring command_page_title(
+    const app_state* state,
+    command_page page
+) {
     switch (page) {
     case command_page::overview:
-        return L"Command Center";
+        return localized(state, orkela::text_id::command_center);
     case command_page::playback:
-        return L"Playback";
+        return localized(state, orkela::text_id::playback);
     case command_page::audio:
-        return L"Audio";
+        return localized(state, orkela::text_id::audio);
     case command_page::visuals:
-        return L"Visual Intelligence";
+        return localized(state, orkela::text_id::visuals);
     case command_page::video:
-        return L"SceneLith Video";
+        return L"SceneLith "
+            + localized(state, orkela::text_id::video);
     case command_page::subtitles:
-        return L"Subtitles & Accessibility";
+        return localized(state, orkela::text_id::subtitles);
     case command_page::library:
-        return L"Library";
+        return localized(state, orkela::text_id::library);
     case command_page::interface_page:
-        return L"Interface";
+        return localized(state, orkela::text_id::interface_settings);
     case command_page::performance:
-        return L"Performance";
+        return localized(state, orkela::text_id::performance);
     case command_page::privacy:
-        return L"Privacy";
+        return localized(state, orkela::text_id::privacy);
     case command_page::hotkeys:
-        return L"Hotkeys";
+        return localized(state, orkela::text_id::hotkeys);
     case command_page::advanced:
-        return L"Advanced & Trust";
+        return localized(state, orkela::text_id::advanced);
     }
-    return L"Command Center";
+    return localized(state, orkela::text_id::command_center);
 }
 
 std::wstring command_page_description(command_page page) {
@@ -1157,11 +1398,11 @@ std::array<setting_tile, 6U> command_tiles(
                 true,
             },
             {
-                L"Visualizers",
-                L"Scope, field, phase, loudness, and immersive views.",
-                L"ROADMAP",
-                false,
-                false,
+                localized(state, orkela::text_id::causal_field),
+                localized(state, orkela::text_id::visual_hint),
+                localized(state, visual_mode_text_id(state->visual_mode)),
+                true,
+                true,
             },
             {
                 L"Fullscreen focus",
@@ -1218,7 +1459,13 @@ std::array<setting_tile, 6U> command_tiles(
             {L"Theme", L"Midnight glass is the current authored theme.", L"MIDNIGHT"},
             {L"Compact mode", L"Reduced chrome for small desktop windows.", L"PLANNED"},
             {L"Global hotkeys", L"System-wide transport controls.", L"PLANNED"},
-            {L"Language", L"Localized UI with invariant format terminology.", L"PLANNED"},
+            {
+                localized(state, orkela::text_id::language),
+                localized(state, orkela::text_id::language_description),
+                selected_language_name(state),
+                true,
+                true,
+            },
         }};
     case command_page::performance:
         return {{
@@ -1336,6 +1583,7 @@ std::array<setting_tile, 6U> command_tiles(
 }
 
 bool setting_matches(
+    const app_state* state,
     const setting_tile& tile,
     command_page page,
     const std::wstring& query
@@ -1344,7 +1592,7 @@ bool setting_matches(
         return true;
     }
     const std::wstring searchable = lowercase(
-        command_page_title(page)
+        command_page_title(state, page)
         + L" "
         + tile.title
         + L" "
@@ -1369,6 +1617,7 @@ std::array<command_tile_view, 6U> visible_command_tiles(
             ++action_index
         ) {
             if (!setting_matches(
+                    state,
                     tiles[action_index],
                     page,
                     state->command_search
@@ -1378,7 +1627,9 @@ std::array<command_tile_view, 6U> visible_command_tiles(
             setting_tile result = tiles[action_index];
             if (!state->command_search.empty()) {
                 result.detail =
-                    command_page_title(page) + L" · " + result.detail;
+                    command_page_title(state, page)
+                    + L" · "
+                    + result.detail;
             }
             visible[output_index] = {
                 std::move(result),
@@ -1541,7 +1792,7 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
         }
         draw_text(
             target,
-            command_navigation[index],
+            command_navigation_label(state, index),
             graphics.button_format.Get(),
             D2D1::RectF(
                 layout.navigation[index].left + 12.0F,
@@ -1559,7 +1810,7 @@ void render_command_center(app_state* state, D2D1_SIZE_F size) {
     draw_text(
         target,
         state->command_search.empty()
-            ? command_page_title(state->active_command_page)
+            ? command_page_title(state, state->active_command_page)
             : L"Search results",
         graphics.headline_format.Get(),
         D2D1::RectF(
@@ -1790,7 +2041,7 @@ void render(app_state* state) {
     );
     draw_text(
         target,
-        L"Truth-aware media",
+        localized(state, orkela::text_id::tagline),
         graphics.label_format.Get(),
         D2D1::RectF(90.0F, 53.0F, 300.0F, 74.0F),
         graphics.text_secondary.Get()
@@ -1842,7 +2093,7 @@ void render(app_state* state) {
     );
     draw_text(
         target,
-        L"COMMAND",
+        localized(state, orkela::text_id::settings),
         graphics.button_format.Get(),
         D2D1::RectF(
             layout.command.left + 36.0F,
@@ -1858,7 +2109,7 @@ void render(app_state* state) {
     draw_round_button(state, layout.open, open_hovered, false);
     draw_text(
         target,
-        L"OPEN MEDIA",
+        localized(state, orkela::text_id::open_resonith),
         graphics.button_format.Get(),
         D2D1::RectF(
             layout.open.left + 20.0F,
@@ -1908,10 +2159,12 @@ void render(app_state* state) {
 
     const std::wstring title = has_audio
         ? state->path.stem().wstring()
-        : L"Your scene. Your sound.";
+        : localized(state, orkela::text_id::tagline);
     const std::wstring subtitle = has_audio
         ? format_details(*state->audio)
-        : L"Native Resonith playback · SceneLith-ready orchestration";
+        : localized(state, orkela::text_id::native_resonith)
+            + L" · "
+            + localized(state, orkela::text_id::portable_session);
     draw_text(
         target,
         title,
@@ -1977,7 +2230,7 @@ void render(app_state* state) {
     );
     draw_text(
         target,
-        L"CAUSAL FIELD",
+        localized(state, orkela::text_id::causal_field),
         graphics.label_format.Get(),
         D2D1::RectF(
             layout.visualizer.left + 22.0F,
@@ -1986,6 +2239,21 @@ void render(app_state* state) {
             layout.visualizer.top + 38.0F
         ),
         graphics.text_secondary.Get()
+    );
+    const std::wstring visual_mode_label =
+        localized(state, visual_mode_text_id(state->visual_mode))
+        + L"  ›";
+    draw_text(
+        target,
+        visual_mode_label,
+        graphics.button_format.Get(),
+        D2D1::RectF(
+            layout.visualizer.right - 180.0F,
+            layout.visualizer.top + 13.0F,
+            layout.visualizer.right - 22.0F,
+            layout.visualizer.top + 39.0F
+        ),
+        graphics.accent.Get()
     );
 
     const D2D1_RECT_F wave_area = D2D1::RectF(
@@ -2000,81 +2268,172 @@ void render(app_state* state) {
         ? static_cast<float>(state->cursor_frame)
             / static_cast<float>(state->audio->frame_count)
         : 0.0F;
-    const float progress_x =
-        wave_area.left + rectangle_width(wave_area) * progress;
 
-    if (has_audio && !state->waveform.empty()) {
-        const float step =
-            rectangle_width(wave_area)
-            / static_cast<float>(state->waveform.size());
-        for (std::size_t index = 0U; index < state->waveform.size(); ++index) {
-            const float x = wave_area.left
-                + (static_cast<float>(index) + 0.5F) * step;
-            const float amplitude = std::max(
-                1.5F,
-                state->waveform[index]
-                    * rectangle_height(wave_area) * 0.44F
-            );
-            target->DrawLine(
-                D2D1::Point2F(x, wave_center - amplitude),
-                D2D1::Point2F(x, wave_center + amplitude),
-                x <= progress_x
-                    ? graphics.accent.Get()
-                    : graphics.muted.Get(),
-                std::max(1.0F, step * 0.52F)
-            );
-        }
-    } else {
+    if (!has_audio) {
         target->DrawLine(
             D2D1::Point2F(wave_area.left, wave_center),
             D2D1::Point2F(wave_area.right, wave_center),
             graphics.muted.Get(),
             1.0F
         );
-    }
-
-    const float spectrum_width = std::min(
-        280.0F,
-        rectangle_width(wave_area) * 0.32F
-    );
-    const float spectrum_left = wave_area.right - spectrum_width;
-    const float bar_step =
-        spectrum_width / static_cast<float>(spectrum_bar_count);
-    if (state->preferences.show_spectrum) {
-        graphics.accent_soft->SetOpacity(has_audio ? 0.70F : 0.12F);
-        for (std::size_t index = 0U; index < spectrum_bar_count; ++index) {
-            const float height = 4.0F
-                + state->spectrum[index] * rectangle_height(wave_area) * 0.72F;
-            const float left = spectrum_left
-                + static_cast<float>(index) * bar_step;
+    } else if (state->visual_mode == orkela::visual_mode::field) {
+        if (!state->waveform.empty()) {
+            const float step = rectangle_width(wave_area)
+                / static_cast<float>(state->waveform.size());
+            graphics.muted->SetOpacity(0.34F);
+            for (
+                std::size_t index = 0U;
+                index < state->waveform.size();
+                ++index
+            ) {
+                const float x = wave_area.left
+                    + (static_cast<float>(index) + 0.5F) * step;
+                const float amplitude = std::max(
+                    1.5F,
+                    state->waveform[index]
+                        * rectangle_height(wave_area) * 0.43F
+                );
+                target->DrawLine(
+                    D2D1::Point2F(x, wave_center - amplitude),
+                    D2D1::Point2F(x, wave_center + amplitude),
+                    graphics.muted.Get(),
+                    std::max(1.0F, step * 0.52F)
+                );
+            }
+            graphics.muted->SetOpacity(1.0F);
+        }
+        const float step = rectangle_width(wave_area)
+            / static_cast<float>(scope_column_count);
+        graphics.accent_soft->SetOpacity(0.43F);
+        graphics.accent->SetOpacity(0.92F);
+        for (std::size_t index = 0U; index < scope_column_count; ++index) {
+            const float x = wave_area.left
+                + (static_cast<float>(index) + 0.5F) * step;
+            const float top = wave_center
+                - state->scope_high[index]
+                    * rectangle_height(wave_area) * 0.42F;
+            const float bottom = wave_center
+                - state->scope_low[index]
+                    * rectangle_height(wave_area) * 0.42F;
+            target->DrawLine(
+                D2D1::Point2F(x, top),
+                D2D1::Point2F(x, bottom),
+                graphics.accent_soft.Get(),
+                std::max(2.0F, step * 1.5F)
+            );
+            target->DrawLine(
+                D2D1::Point2F(x, top),
+                D2D1::Point2F(x, bottom),
+                graphics.accent.Get(),
+                std::max(1.0F, step * 0.55F)
+            );
+        }
+        graphics.accent->SetOpacity(1.0F);
+        graphics.accent_soft->SetOpacity(1.0F);
+    } else if (state->visual_mode == orkela::visual_mode::spectrum) {
+        const float step = rectangle_width(wave_area)
+            / static_cast<float>(orkela::visual_spectrum_bands);
+        for (
+            std::size_t band = 0U;
+            band < orkela::visual_spectrum_bands;
+            ++band
+        ) {
+            const float level = state->preferences.show_spectrum
+                ? state->visual.spectrum[band]
+                : 0.0F;
+            const float height = 3.0F
+                + level * rectangle_height(wave_area) * 0.91F;
+            const float left =
+                wave_area.left + static_cast<float>(band) * step;
+            graphics.accent_soft->SetOpacity(0.35F + 0.62F * level);
             target->FillRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(
                         left + 1.0F,
                         wave_area.bottom - height,
-                        left + bar_step - 1.5F,
+                        left + step - 1.5F,
                         wave_area.bottom
                     ),
-                    2.5F,
-                    2.5F
+                    3.0F,
+                    3.0F
                 ),
                 graphics.accent_soft.Get()
             );
         }
         graphics.accent_soft->SetOpacity(1.0F);
+    } else if (state->visual_mode == orkela::visual_mode::wave) {
+        const float step = rectangle_width(wave_area)
+            / static_cast<float>(orkela::visual_wave_points - 1U);
+        graphics.accent_soft->SetOpacity(0.30F);
+        for (
+            std::size_t index = 1U;
+            index < orkela::visual_wave_points;
+            ++index
+        ) {
+            const float previous_x = wave_area.left
+                + static_cast<float>(index - 1U) * step;
+            const float current_x = wave_area.left
+                + static_cast<float>(index) * step;
+            const float previous_y = wave_center
+                - state->visual.wave[index - 1U]
+                    * rectangle_height(wave_area) * 0.46F;
+            const float current_y = wave_center
+                - state->visual.wave[index]
+                    * rectangle_height(wave_area) * 0.46F;
+            target->DrawLine(
+                D2D1::Point2F(previous_x, previous_y),
+                D2D1::Point2F(current_x, current_y),
+                graphics.accent_soft.Get(),
+                6.0F
+            );
+            target->DrawLine(
+                D2D1::Point2F(previous_x, previous_y),
+                D2D1::Point2F(current_x, current_y),
+                graphics.accent.Get(),
+                1.8F
+            );
+        }
+        graphics.accent_soft->SetOpacity(1.0F);
     } else {
-        draw_text(
-            target,
-            L"SPECTRUM HIDDEN",
-            graphics.label_format.Get(),
-            D2D1::RectF(
-                spectrum_left,
-                wave_area.bottom - 24.0F,
-                wave_area.right,
-                wave_area.bottom
-            ),
-            graphics.text_secondary.Get()
+        const std::size_t columns = std::max<std::size_t>(
+            1U,
+            state->visual.history_columns
         );
+        const float column_width =
+            rectangle_width(wave_area) / static_cast<float>(columns);
+        const float band_height = rectangle_height(wave_area)
+            / static_cast<float>(orkela::visual_spectrum_bands);
+        for (std::size_t column = 0U; column < columns; ++column) {
+            for (
+                std::size_t band = 0U;
+                band < orkela::visual_spectrum_bands;
+                ++band
+            ) {
+                const float level = state->visual.history[
+                    column * orkela::visual_spectrum_bands + band
+                ];
+                if (level <= 0.015F) {
+                    continue;
+                }
+                const float left = wave_area.left
+                    + static_cast<float>(column) * column_width;
+                const float bottom = wave_area.bottom
+                    - static_cast<float>(band) * band_height;
+                graphics.accent_soft->SetOpacity(
+                    std::clamp(0.10F + level * 0.90F, 0.10F, 1.0F)
+                );
+                target->FillRectangle(
+                    D2D1::RectF(
+                        left,
+                        bottom - band_height,
+                        left + column_width + 0.4F,
+                        bottom
+                    ),
+                    graphics.accent_soft.Get()
+                );
+            }
+        }
+        graphics.accent_soft->SetOpacity(1.0F);
     }
 
     target->FillRoundedRectangle(
@@ -2287,7 +2646,7 @@ void begin_playback(app_state* state, std::uint32_t start_frame) {
         state->audio->frame_count - 1U
     );
     state->cursor_frame = bounded;
-    state->status = L"Playing bounded MAF Truth reconstruction.";
+    state->status = localized(state, orkela::text_id::playing);
     const std::uint64_t generation = ++state->playback_generation;
     const HWND window = state->window;
     state->player.set_volume(state->volume);
@@ -2328,7 +2687,7 @@ void toggle_playback(app_state* state) {
         } else {
             state->cursor_frame = state->player.position_frame();
             state->player.pause();
-            state->status = L"Playback paused.";
+            state->status = localized(state, orkela::text_id::paused);
         }
     } else {
         const std::uint32_t start =
@@ -2348,10 +2707,12 @@ void seek_to(app_state* state, std::uint32_t frame) {
         state->player.is_playing() && !state->player.is_paused();
     stop_playback(state, false);
     state->cursor_frame = std::min(frame, state->audio->frame_count);
+    state->last_visual_start =
+        std::numeric_limits<std::uint32_t>::max();
     if (restart && state->cursor_frame < state->audio->frame_count) {
         begin_playback(state, state->cursor_frame);
     } else {
-        state->status = L"Playback position changed.";
+        state->status = localized(state, orkela::text_id::seeking);
         invalidate(state);
     }
 }
@@ -2383,10 +2744,19 @@ void load_file(app_state* state, const std::filesystem::path& path) {
     stop_playback(state, true);
     state->audio.reset();
     state->waveform.clear();
-    state->spectrum.fill(0.0F);
+    state->visual_pcm.clear();
+    state->scope_low.fill(0.0F);
+    state->scope_high.fill(0.0F);
+    state->visual_analyzer.reset();
+    state->visual = {};
+    state->last_visual_start =
+        std::numeric_limits<std::uint32_t>::max();
     state->path = path;
     state->format_name = L"VALIDATING";
-    state->status = L"Authenticating bitstream and preflighting decoder bounds…";
+    state->status = localized(
+        state,
+        orkela::text_id::authenticating
+    );
     invalidate(state);
     UpdateWindow(state->window);
 
@@ -2431,6 +2801,7 @@ void load_file(app_state* state, const std::filesystem::path& path) {
             if (!orkela::decode_resonith_file(path, decoded.get(), &error)) {
                 decoded.reset();
             }
+            const auto analysis_audio = decoded;
             auto* payload = new decode_payload{
                 generation,
                 path,
@@ -2446,6 +2817,35 @@ void load_file(app_state* state, const std::filesystem::path& path) {
                 ) == FALSE
             ) {
                 delete payload;
+                return;
+            }
+            if (analysis_audio == nullptr) {
+                return;
+            }
+
+            SetThreadPriority(
+                GetCurrentThread(),
+                THREAD_PRIORITY_BELOW_NORMAL
+            );
+            auto* waveform_result = new waveform_payload{
+                generation,
+                std::vector<float>(640U, 0.0F),
+            };
+            std::string waveform_error;
+            if (
+                !orkela::analyze_resonith_waveform(
+                    *analysis_audio,
+                    waveform_result->waveform,
+                    &waveform_error
+                )
+                || PostMessageW(
+                    window,
+                    waveform_done_message,
+                    0U,
+                    reinterpret_cast<LPARAM>(waveform_result)
+                ) == FALSE
+            ) {
+                delete waveform_result;
             }
         }
     ).detach();
@@ -2560,6 +2960,12 @@ void activate_command_tile(
             preferences.animate_visuals = !preferences.animate_visuals;
         } else if (index == 1U) {
             preferences.show_spectrum = !preferences.show_spectrum;
+        } else if (index == 4U) {
+            state->visual_mode =
+                orkela::next_visual_mode(state->visual_mode);
+            preferences.visual_mode = static_cast<std::uint8_t>(
+                state->visual_mode
+            );
         } else {
             return;
         }
@@ -2567,20 +2973,41 @@ void activate_command_tile(
     case command_page::interface_page:
         if (index == 0U) {
             preferences.animate_visuals = !preferences.animate_visuals;
+        } else if (index == 5U) {
+            preferences.interface_language = static_cast<std::uint8_t>(
+                (preferences.interface_language + 1U)
+                    % (orkela::supported_language_count + 1U)
+            );
+            state->graphics.discard_device_resources();
+            state->status = localized(
+                state,
+                orkela::text_id::ready
+            );
+            const std::wstring title =
+                L"Orkela — "
+                + localized(state, orkela::text_id::tagline);
+            SetWindowTextW(state->window, title.c_str());
         } else {
             return;
         }
         break;
-    case command_page::advanced:
+    case command_page::advanced: {
         if (index != 2U) {
             return;
         }
         orkela::reset_preferences();
         preferences = {};
         state->volume = preferences.volume;
+        state->visual_mode = orkela::visual_mode::field;
         state->player.set_volume(state->volume);
-        state->status = L"Preferences reset to Orkela defaults.";
+        state->graphics.discard_device_resources();
+        state->status = localized(state, orkela::text_id::ready);
+        const std::wstring title =
+            L"Orkela — "
+            + localized(state, orkela::text_id::tagline);
+        SetWindowTextW(state->window, title.c_str());
         break;
+    }
     case command_page::video:
     case command_page::subtitles:
     case command_page::library:
@@ -2661,11 +3088,19 @@ void handle_click(app_state* state, D2D1_POINT_2F point) {
     }
     if (contains(layout.open, point)) {
         choose_file(state);
+    } else if (contains(layout.visualizer, point)) {
+        state->visual_mode =
+            orkela::next_visual_mode(state->visual_mode);
+        state->preferences.visual_mode = static_cast<std::uint8_t>(
+            state->visual_mode
+        );
+        save_session_preferences(state);
+        invalidate(state);
     } else if (contains(layout.play, point)) {
         toggle_playback(state);
     } else if (contains(layout.stop, point)) {
         stop_playback(state, true);
-        state->status = L"Playback stopped.";
+        state->status = localized(state, orkela::text_id::stopped);
         invalidate(state);
     } else if (contains(layout.rewind, point)) {
         seek_relative(
@@ -2760,6 +3195,17 @@ LRESULT CALLBACK window_procedure(
             ->hInstance;
         created->dpi = static_cast<float>(GetDpiForWindow(window));
         created->preferences = orkela::load_preferences();
+        created->visual_mode = static_cast<orkela::visual_mode>(
+            std::min<std::uint8_t>(created->preferences.visual_mode, 3U)
+        );
+        created->status = localized(
+            created,
+            orkela::text_id::source_footer
+        );
+        const std::wstring window_title =
+            L"Orkela — "
+            + localized(created, orkela::text_id::tagline);
+        SetWindowTextW(window, window_title.c_str());
         created->volume = created->preferences.remember_volume
             ? created->preferences.volume
             : 0.85F;
@@ -2873,6 +3319,14 @@ LRESULT CALLBACK window_procedure(
             if (!state->command_center_open) {
                 state->command_search.clear();
             }
+            invalidate(state);
+        } else if (!state->command_center_open && word == L'V') {
+            state->visual_mode =
+                orkela::next_visual_mode(state->visual_mode);
+            state->preferences.visual_mode = static_cast<std::uint8_t>(
+                state->visual_mode
+            );
+            save_session_preferences(state);
             invalidate(state);
         } else if (
             state->command_center_open
@@ -3080,10 +3534,20 @@ LRESULT CALLBACK window_procedure(
             && payload->generation == state->playback_generation
         ) {
             state->cursor_frame = state->player.position_frame();
+            if (payload->message == L"Playback complete.") {
+                payload->message = localized(
+                    state,
+                    orkela::text_id::playback_complete
+                );
+            }
             state->status = std::move(payload->message);
             if (
                 state->preferences.loop_current_media
-                && state->status == L"Playback complete."
+                && state->status
+                    == localized(
+                        state,
+                        orkela::text_id::playback_complete
+                    )
                 && state->audio != nullptr
             ) {
                 begin_playback(state, 0U);
@@ -3115,13 +3579,16 @@ LRESULT CALLBACK window_procedure(
         state->path = std::move(payload->path);
         state->audio = std::move(payload->audio);
         state->waveform = build_waveform(*state->audio);
+        state->visual_pcm.assign(
+            4096U * state->audio->channels,
+            0
+        );
         const std::wstring extension =
             lowercase(state->path.extension().wstring());
         state->format_name = extension == L".resonith"
             ? L"RESONITH · BOUNDED MAF"
             : L"RESONITH · RESEARCH TRANSPORT";
-        state->status =
-            L"Ready. Space plays or pauses; arrows use the selected seek step.";
+        state->status = localized(state, orkela::text_id::ready);
         const bool same_resume_item =
             state->preferences.resume_last_position
             && lowercase(state->preferences.last_media.wstring())
@@ -3139,6 +3606,21 @@ LRESULT CALLBACK window_procedure(
         invalidate(state);
         if (state->preferences.autoplay_on_open) {
             begin_playback(state, state->cursor_frame);
+        }
+        return 0;
+    }
+    case waveform_done_message: {
+        std::unique_ptr<waveform_payload> payload(
+            reinterpret_cast<waveform_payload*>(long_word)
+        );
+        if (
+            state != nullptr
+            && payload != nullptr
+            && payload->generation == state->decode_generation
+            && !payload->waveform.empty()
+        ) {
+            state->waveform = std::move(payload->waveform);
+            invalidate(state);
         }
         return 0;
     }

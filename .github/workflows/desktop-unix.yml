@@ -1,0 +1,314 @@
+name: Desktop Apple and Unix
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    name: Ubuntu 24.04 GTK/GStreamer application
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install native desktop dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake \
+            dpkg-dev \
+            g++ \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            libgtk-4-dev \
+            ninja-build \
+            pkg-config \
+            xvfb
+
+      - name: Configure, build, and run portable gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/ubuntu -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DORKELA_BUILD_APPLICATIONS=ON \
+            -DORKELA_BUILD_GATES=ON \
+            -DORKELA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/ubuntu --parallel
+          ctest --test-dir build/ubuntu --output-on-failure
+          timeout 4s xvfb-run -a build/ubuntu/orkela || test "$?" -eq 124
+
+      - name: Build and transact Ubuntu package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          mkdir -p out/ubuntu
+          cp build/ubuntu/orkela out/ubuntu/orkela
+          cp README.md CHANGELOG.md VERSION out/ubuntu/
+          sha256sum out/ubuntu/* > out/ubuntu/SHA256SUMS
+          tar -czf out/Orkela-Ubuntu-24.04.tar.gz -C out/ubuntu .
+          mkdir -p build/ubuntu/packages
+          cpack --config build/ubuntu/CPackConfig.cmake \
+            -G DEB -B build/ubuntu/packages
+          package="$(
+            find build/ubuntu/packages -maxdepth 1 \
+              -name '*.deb' -print -quit
+          )"
+          test -n "$package"
+          dpkg-deb --info "$package"
+          sudo apt-get install --yes "$package"
+          test -x /usr/bin/orkela
+          timeout 4s xvfb-run -a /usr/bin/orkela || test "$?" -eq 124
+          sudo apt-get remove --yes orkela
+          test ! -e /usr/bin/orkela
+          cp "$package" \
+            "out/Orkela-Ubuntu-24.04-amd64-$version.deb"
+
+      - name: Upload Ubuntu application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Ubuntu-24.04-${{ github.sha }}
+          path: |
+            out/Orkela-Ubuntu-24.04.tar.gz
+            out/Orkela-Ubuntu-24.04-amd64-*.deb
+          if-no-files-found: error
+
+  debian:
+    name: Debian 13 GTK/GStreamer application
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
+    timeout-minutes: 30
+    steps:
+      - name: Install checkout prerequisites
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install --yes ca-certificates git
+
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install native desktop dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get install --yes \
+            appstream \
+            cmake \
+            dpkg-dev \
+            g++ \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            libgtk-4-dev \
+            ninja-build \
+            pkg-config \
+            xvfb
+
+      - name: Configure, build, and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/debian -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DORKELA_BUILD_APPLICATIONS=ON \
+            -DORKELA_BUILD_GATES=ON \
+            -DORKELA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/debian --parallel
+          ctest --test-dir build/debian --output-on-failure
+          appstreamcli validate \
+            packaging/linux/org.scenelith.orkela.metainfo.xml
+          timeout 4s xvfb-run -a build/debian/orkela || test "$?" -eq 124
+          version="$(tr -d '\r\n' < VERSION)"
+          mkdir -p out/debian
+          cp build/debian/orkela out/debian/orkela
+          cp README.md CHANGELOG.md VERSION out/debian/
+          sha256sum out/debian/* > out/debian/SHA256SUMS
+          tar -czf out/Orkela-Debian-13.tar.gz -C out/debian .
+          mkdir -p build/debian/packages
+          cpack --config build/debian/CPackConfig.cmake \
+            -G DEB -B build/debian/packages
+          package="$(
+            find build/debian/packages -maxdepth 1 \
+              -name '*.deb' -print -quit
+          )"
+          test -n "$package"
+          dpkg-deb --info "$package"
+          apt-get install --yes "$package"
+          test -x /usr/bin/orkela
+          timeout 4s xvfb-run -a /usr/bin/orkela || test "$?" -eq 124
+          apt-get remove --yes orkela
+          test ! -e /usr/bin/orkela
+          cp "$package" \
+            "out/Orkela-Debian-13-amd64-$version.deb"
+
+      - name: Upload Debian application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Debian-13-${{ github.sha }}
+          path: |
+            out/Orkela-Debian-13.tar.gz
+            out/Orkela-Debian-13-amd64-*.deb
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD 14 GTK/GStreamer application
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build and test inside FreeBSD
+        uses: vmactions/freebsd-vm@77ed28d336d03fe19a3f4f7266c1d2c4714dd79d # v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: |
+            pkg install -y \
+              cmake \
+              git \
+              gmake \
+              gstreamer1 \
+              gstreamer1-plugins \
+              gtk4 \
+              llvm \
+              ninja \
+              pkgconf
+          run: |
+            set -eu
+            export CC=clang
+            export CXX=clang++
+            cmake -S . -B build/freebsd -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DORKELA_BUILD_APPLICATIONS=ON \
+              -DORKELA_BUILD_GATES=ON \
+              -DORKELA_WARNINGS_AS_ERRORS=ON
+            cmake --build build/freebsd --parallel
+            ctest --test-dir build/freebsd --output-on-failure
+            mkdir -p build/freebsd/packages
+            cpack --config build/freebsd/CPackConfig.cmake \
+              -G FreeBSD -B build/freebsd/packages
+            package="$(
+              find build/freebsd/packages -maxdepth 1 \
+                -name '*.pkg' -print -quit
+            )"
+            test -n "$package"
+            pkg info -F "$package"
+            pkg add -f "$package"
+            test -x /usr/local/bin/orkela
+            pkg delete -y orkela
+            test ! -e /usr/local/bin/orkela
+            version="$(tr -d '\r\n' < VERSION)"
+            mkdir -p out/freebsd
+            cp build/freebsd/orkela out/freebsd/orkela
+            cp README.md CHANGELOG.md VERSION out/freebsd/
+            sha256 -q out/freebsd/orkela > out/freebsd/orkela.sha256
+            tar -czf out/Orkela-FreeBSD-14.tar.gz -C out/freebsd .
+            cp "$package" \
+              "out/Orkela-FreeBSD-14-amd64-$version.pkg"
+
+      - name: Upload FreeBSD application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-FreeBSD-14-${{ github.sha }}
+          path: |
+            out/Orkela-FreeBSD-14.tar.gz
+            out/Orkela-FreeBSD-14-amd64-*.pkg
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }} application
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: macos-arm64
+            arch: arm64
+            runner: macos-26
+          - preset: macos-x86_64
+            arch: x86_64
+            runner: macos-26-intel
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select newest installed stable Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode_path="$(
+            find /Applications -maxdepth 1 -type d -name 'Xcode*.app' \
+              ! -iname '*beta*' ! -iname '*rc*' \
+              | sort -V \
+              | tail -n 1
+          )"
+          test -n "$xcode_path"
+          sudo xcode-select -s "$xcode_path"
+          xcodebuild -version
+
+      - name: Configure and build native macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --preset "${{ matrix.preset }}"
+          cmake --build --preset "${{ matrix.preset }}"
+          app="$(
+            find "build/${{ matrix.preset }}" \
+              -type d -name Orkela.app -print -quit
+          )"
+          test -n "$app"
+          test -s "$app/Contents/MacOS/Orkela"
+          test "$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist"
+          )" = "org.scenelith.orkela"
+          xcrun lipo -archs "$app/Contents/MacOS/Orkela" \
+            | tr ' ' '\n' \
+            | grep -Fxq "${{ matrix.arch }}"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          mkdir -p out
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app" "out/Orkela-macOS-${{ matrix.arch }}.zip"
+          version="$(tr -d '\r\n' < VERSION)"
+          productbuild \
+            --component "$app" /Applications \
+            "out/Orkela-macOS-${{ matrix.arch }}-$version.pkg"
+          pkgutil --payload-files \
+            "out/Orkela-macOS-${{ matrix.arch }}-$version.pkg" \
+            | grep -Fq "Orkela.app/Contents/MacOS/Orkela"
+          shasum -a 256 "out/Orkela-macOS-${{ matrix.arch }}.zip" \
+            > "out/Orkela-macOS-${{ matrix.arch }}.sha256"
+          shasum -a 256 \
+            "out/Orkela-macOS-${{ matrix.arch }}-$version.pkg" \
+            >> "out/Orkela-macOS-${{ matrix.arch }}.sha256"
+
+      - name: Upload macOS application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-macOS-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            out/Orkela-macOS-${{ matrix.arch }}.zip
+            out/Orkela-macOS-${{ matrix.arch }}-*.pkg
+            out/Orkela-macOS-${{ matrix.arch }}.sha256
+          if-no-files-found: error

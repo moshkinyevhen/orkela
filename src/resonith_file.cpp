@@ -2,9 +2,11 @@
 
 #include "orkela/resonith_pull_decoder.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -84,22 +86,53 @@ bool decode_resonith_file(
     *audio = {};
 
     try {
-        // File ownership is platform-specific; bitstream validation and
-        // decode policy live in the portable session library.
-        std::vector<std::uint8_t> input = read_file(path);
+        // File ownership is platform-specific; validation and synthesis
+        // policy remain in the portable pull session.
+        auto source = std::make_shared<const std::vector<std::uint8_t>>(
+            read_file(path)
+        );
         std::string portable_error;
-        if (
-            !decode_resonith_bytes(
-                std::move(input),
-                audio,
-                &portable_error
-            )
-        ) {
+        auto decoder = resonith_pull_decoder::open(
+            *source,
+            &portable_error
+        );
+        if (decoder == nullptr) {
             return fail(
                 L"Cannot decode file: " + widen_ascii(portable_error.c_str()),
                 error
             );
         }
+        const resonith_stream_info info = decoder->info();
+        std::vector<std::int16_t> preview(
+            std::max<std::size_t>(1U, info.maximum_packet_elements)
+        );
+        std::uint32_t logical_start = 0U;
+        std::size_t frames_written = 0U;
+        const pull_result result = decoder->read_next(
+            preview,
+            &logical_start,
+            &frames_written,
+            &portable_error
+        );
+        if (
+            result != pull_result::data
+            || logical_start != 0U
+            || frames_written == 0U
+        ) {
+            return fail(
+                L"Cannot decode first audio packet: "
+                    + widen_ascii(portable_error.c_str()),
+                error
+            );
+        }
+        preview.resize(
+            frames_written * static_cast<std::size_t>(info.channels)
+        );
+        audio->sample_rate = info.sample_rate;
+        audio->channels = info.channels;
+        audio->frame_count = info.frame_count;
+        audio->source_bytes = std::move(source);
+        audio->samples = std::move(preview);
         if (error != nullptr) {
             error->clear();
         }
@@ -109,6 +142,114 @@ bool decode_resonith_file(
             L"Cannot decode file: " + widen_ascii(exception.what()),
             error
         );
+    }
+}
+
+bool analyze_resonith_waveform(
+    const decoded_audio& audio,
+    std::span<float> waveform,
+    std::string* error
+) {
+    std::fill(waveform.begin(), waveform.end(), 0.0F);
+    if (
+        audio.source_bytes == nullptr
+        || audio.source_bytes->empty()
+        || audio.channels == 0U
+        || audio.frame_count == 0U
+        || waveform.empty()
+    ) {
+        if (error != nullptr) {
+            *error = "invalid waveform-analysis input";
+        }
+        return false;
+    }
+
+    try {
+        std::string portable_error;
+        auto decoder = resonith_pull_decoder::open(
+            *audio.source_bytes,
+            &portable_error
+        );
+        if (decoder == nullptr) {
+            if (error != nullptr) {
+                *error = std::move(portable_error);
+            }
+            return false;
+        }
+        const resonith_stream_info info = decoder->info();
+        if (
+            info.channels != audio.channels
+            || info.frame_count != audio.frame_count
+        ) {
+            if (error != nullptr) {
+                *error = "waveform stream metadata changed after preflight";
+            }
+            return false;
+        }
+
+        std::vector<std::int16_t> packet(
+            std::max<std::size_t>(1U, info.maximum_packet_elements)
+        );
+        while (true) {
+            std::uint32_t logical_start = 0U;
+            std::size_t frames_written = 0U;
+            const pull_result result = decoder->read_next(
+                packet,
+                &logical_start,
+                &frames_written,
+                &portable_error
+            );
+            if (result == pull_result::error) {
+                if (error != nullptr) {
+                    *error = std::move(portable_error);
+                }
+                return false;
+            }
+            if (result == pull_result::end) {
+                break;
+            }
+            for (std::size_t local = 0U; local < frames_written; ++local) {
+                const std::uint64_t absolute =
+                    static_cast<std::uint64_t>(logical_start) + local;
+                if (absolute >= audio.frame_count) {
+                    if (error != nullptr) {
+                        *error = "waveform packet exceeds declared duration";
+                    }
+                    return false;
+                }
+                const std::size_t column = std::min<std::size_t>(
+                    waveform.size() - 1U,
+                    absolute * waveform.size() / audio.frame_count
+                );
+                std::int32_t mixed = 0;
+                for (
+                    std::uint16_t channel = 0U;
+                    channel < audio.channels;
+                    ++channel
+                ) {
+                    mixed += std::abs(
+                        static_cast<std::int32_t>(
+                            packet[
+                                local * audio.channels + channel
+                            ]
+                        )
+                    );
+                }
+                const float peak = static_cast<float>(
+                    mixed / static_cast<std::int32_t>(audio.channels)
+                ) / 32768.0F;
+                waveform[column] = std::max(waveform[column], peak);
+            }
+        }
+        if (error != nullptr) {
+            error->clear();
+        }
+        return true;
+    } catch (const std::exception& exception) {
+        if (error != nullptr) {
+            *error = exception.what();
+        }
+        return false;
     }
 }
 

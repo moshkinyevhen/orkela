@@ -10,17 +10,40 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-2022
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+            run_tests: true
+          - arch: arm64
+            cmake_arch: ARM64
+            run_tests: false
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Configure
-        run: cmake -S . -B build -A x64
+        shell: pwsh
+        run: |
+          cmake -S . -B "build/${{ matrix.arch }}" `
+            -A "${{ matrix.cmake_arch }}" `
+            -DORKELA_BUILD_APPLICATIONS=ON `
+            -DORKELA_BUILD_GATES=${{ matrix.run_tests && 'ON' || 'OFF' }} `
+            -DORKELA_WARNINGS_AS_ERRORS=ON
 
       - name: Build
         shell: pwsh
         run: |
-          $output = & cmake --build build --config Release --parallel 2>&1 |
+          $output = & cmake --build "build/${{ matrix.arch }}" `
+            --config Release `
+            --parallel 2 2>&1 |
             Tee-Object -Variable captured
           $status = $LASTEXITCODE
           foreach ($line in $captured) {
@@ -38,14 +61,79 @@ jobs:
             exit $status
           }
 
+      - name: Run x64 portable and playback gates
+        if: matrix.run_tests
+        shell: pwsh
+        run: |
+          ctest `
+            --test-dir "build/${{ matrix.arch }}" `
+            -C Release `
+            --output-on-failure
+          & "build/${{ matrix.arch }}/Release/orkela_windows_playback_gate.exe" `
+            "samples/emotional-piano.resonith"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path out
-          Copy-Item build/Release/Orkela.exe out/Orkela.exe
+          $out = "out/Orkela-Windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Copy-Item `
+            "build/${{ matrix.arch }}/Release/Orkela.exe" `
+            "$out/Orkela.exe"
+          Copy-Item README.md,CHANGELOG.md,VERSION $out
+          Get-FileHash "$out/Orkela.exe" -Algorithm SHA256 |
+            ForEach-Object {
+              "$($_.Hash.ToLower())  Orkela.exe"
+            } |
+            Set-Content "$out/SHA256SUMS" -Encoding ascii
+          Compress-Archive `
+            -Path "$out/*" `
+            -DestinationPath "$out.zip" `
+            -CompressionLevel Optimal
 
-      - uses: actions/upload-artifact@v4
+      - name: Bootstrap verified NSIS
+        shell: pwsh
+        run: |
+          powershell.exe `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File tools/release/bootstrap_nsis.ps1 `
+            -Destination "$env:RUNNER_TEMP/nsis-3.12"
+
+      - name: Build native-payload installer
+        shell: pwsh
+        run: |
+          powershell.exe `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File tools/release/build_windows_installer.ps1 `
+            -Architecture "${{ matrix.arch }}" `
+            -Executable `
+              "build/${{ matrix.arch }}/Release/Orkela.exe" `
+            -NsisDirectory "$env:RUNNER_TEMP/nsis-3.12"
+
+      - name: Test x64 install and uninstall transaction
+        if: matrix.run_tests
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          powershell.exe `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File tools/release/test_windows_installer.ps1 `
+            -Installer `
+              "out/installers/Orkela-Windows-x64-$version-Setup.exe" `
+            -ExpectedArchitecture x64 `
+            -ExpectedVersion $version
+
+      - name: Upload application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Orkela-windows-x64
-          path: out/Orkela.exe
+          name: Orkela-Windows-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            out/Orkela-Windows-${{ matrix.arch }}.zip
+            out/installers/Orkela-Windows-${{ matrix.arch }}-*-Setup.exe
           if-no-files-found: error
