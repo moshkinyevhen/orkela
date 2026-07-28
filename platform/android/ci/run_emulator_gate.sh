@@ -92,6 +92,14 @@ printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
 # allocated while ADB is already listening. Android Emulator documents this
 # ordering as material to device discovery for some port assignments.
 adb start-server
+emulator_feature_args=""
+if [[ "$runtime_api" -eq 37 ]]; then
+  # Android 17 build CE2A.260420.019 exposes an inconsistent guest/host DMA
+  # color-buffer path with Emulator 36.6.11 on Linux. Disable both generations
+  # of that emulator-only transport family before the guest starts. The Android
+  # compositor, RegionSampling, renderer, UI and screenshot gates stay enabled.
+  emulator_feature_args="-feature -GLDMA -feature -GLDMA2"
+fi
 "$ANDROID_HOME/emulator/emulator" "@$avd_name" \
   -no-window \
   -no-boot-anim \
@@ -102,6 +110,7 @@ adb start-server
   -memory 4096 \
   -partition-size 4096 \
   -gpu software \
+  $emulator_feature_args \
   -port "$emulator_console_port" \
   -verbose \
   > "$evidence/logs/emulator.log" 2>&1 &
@@ -138,143 +147,14 @@ if [[ "$device_seen" -ne 1 ]]; then
 fi
 export ANDROID_SERIAL="$device_serial"
 
-# Android 17 build CE2A.260420.019 has a host/guest mapper mismatch in the
-# emulator's system RegionSampling path. On Linux it can abort SurfaceFlinger
-# before app instrumentation starts. Restrict the workaround to the exact two
-# audited userdebug fingerprints, disable only luma-region sampling, restart
-# SurfaceFlinger so it reads the property, then return ADB to an unprivileged
-# shell before any Orkela APK is installed. Rendering, screenshots, UIAutomator,
-# AudioTrack, native decode and the exact PCM gate remain enabled.
-compositor_workaround="none"
-stock_compositor_configuration=true
+# API 37 uses a non-default host-emulator graphics transport configuration, but
+# the Android guest compositor remains stock. API 26 uses stock configuration
+# on both sides.
+emulator_graphics_workaround="none"
+stock_android_guest_compositor_configuration=true
+stock_emulator_graphics_feature_configuration=true
 surfaceflinger_crash_signatures_before=0
 observed_fingerprint=""
-if [[ "$runtime_api" -eq 37 ]]; then
-  observed_fingerprint="$(
-    adb shell getprop ro.build.fingerprint | tr -d '\r'
-  )"
-  build_id="$(adb shell getprop ro.build.id | tr -d '\r')"
-  debuggable="$(adb shell getprop ro.debuggable | tr -d '\r')"
-  selinux_before="$(adb shell getenforce | tr -d '\r')"
-  renderer_egl="$(adb shell getprop ro.hardware.egl | tr -d '\r')"
-  renderer_transport="$(
-    adb shell getprop ro.boot.qemu.gltransport.name | tr -d '\r'
-  )"
-  test "$observed_fingerprint" = "$expected_fingerprint"
-  test "$build_id" = "CE2A.260420.019"
-  test "$debuggable" = "1"
-  test "$selinux_before" = "Enforcing"
-
-  adb logcat -b crash -d \
-    > "$evidence/logs/logcat-crash-before-surfaceflinger-stabilization.txt"
-  surfaceflinger_crash_signatures_before="$(
-    grep -Eic \
-      "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling" \
-      "$evidence/logs/logcat-crash-before-surfaceflinger-stabilization.txt" \
-      || true
-  )"
-
-  timeout --signal=TERM --kill-after=5s 30s adb root
-  adb_root_ready=0
-  root_deadline=$((SECONDS + 60))
-  while ((SECONDS < root_deadline)); do
-    if [[ "$(
-        timeout --signal=TERM --kill-after=5s 10s \
-          adb -s "$device_serial" shell id -u 2>/dev/null \
-          | tr -d '\r' \
-          || true
-      )" == "0" ]]; then
-      adb_root_ready=1
-      break
-    fi
-    sleep 1
-  done
-  test "$adb_root_ready" -eq 1
-
-  surfaceflinger_pid_before=""
-  surfaceflinger_deadline=$((SECONDS + 60))
-  while ((SECONDS < surfaceflinger_deadline)); do
-    surfaceflinger_pid_before="$(
-      adb shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true
-    )"
-    if [[ -n "$surfaceflinger_pid_before" ]]; then
-      break
-    fi
-    sleep 1
-  done
-  test -n "$surfaceflinger_pid_before"
-
-  adb shell setprop debug.sf.luma_sampling 0
-  test "$(
-      adb shell getprop debug.sf.luma_sampling | tr -d '\r'
-    )" = "0"
-  adb shell setprop ctl.restart surfaceflinger
-
-  surfaceflinger_pid_after=""
-  surfaceflinger_restarted=0
-  surfaceflinger_deadline=$((SECONDS + 90))
-  while ((SECONDS < surfaceflinger_deadline)); do
-    surfaceflinger_pid_after="$(
-      adb shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true
-    )"
-    surfaceflinger_state="$(
-      adb shell getprop init.svc.surfaceflinger 2>/dev/null \
-        | tr -d '\r' \
-        || true
-    )"
-    surfaceflinger_service="$(
-      adb shell service check SurfaceFlinger 2>/dev/null \
-        | tr -d '\r' \
-        || true
-    )"
-    if [[ -n "$surfaceflinger_pid_after" \
-        && "$surfaceflinger_pid_after" != "$surfaceflinger_pid_before" \
-        && "$surfaceflinger_state" = "running" \
-        && "$surfaceflinger_service" = *"found"* ]]; then
-      surfaceflinger_restarted=1
-      break
-    fi
-    sleep 1
-  done
-  test "$surfaceflinger_restarted" -eq 1
-
-  timeout --signal=TERM --kill-after=5s 30s adb unroot
-  adb_shell_ready=0
-  shell_deadline=$((SECONDS + 60))
-  while ((SECONDS < shell_deadline)); do
-    shell_uid="$(
-      timeout --signal=TERM --kill-after=5s 10s \
-        adb -s "$device_serial" shell id -u 2>/dev/null \
-        | tr -d '\r' \
-        || true
-    )"
-    if [[ "$shell_uid" = "2000" ]]; then
-      adb_shell_ready=1
-      break
-    fi
-    sleep 1
-  done
-  test "$adb_shell_ready" -eq 1
-  test "$(adb shell getenforce | tr -d '\r')" = "Enforcing"
-  test "$(
-      adb shell getprop debug.sf.luma_sampling | tr -d '\r'
-    )" = "0"
-
-  {
-    echo "fingerprint=$observed_fingerprint"
-    echo "build_id=$build_id"
-    echo "selinux_before=$selinux_before"
-    echo "renderer_egl=$renderer_egl"
-    echo "renderer_transport=$renderer_transport"
-    echo "surfaceflinger_pid_before=$surfaceflinger_pid_before"
-    echo "surfaceflinger_pid_after=$surfaceflinger_pid_after"
-    echo "luma_sampling=0"
-    echo "post_workaround_adb_uid=$shell_uid"
-    echo "post_workaround_selinux=Enforcing"
-  } > "$evidence/SURFACEFLINGER-STABILIZATION.txt"
-  compositor_workaround="disable-region-luma-sampling-and-restart-surfaceflinger"
-  stock_compositor_configuration=false
-fi
 
 ready=0
 boot_deadline=$((SECONDS + 285))
@@ -374,11 +254,87 @@ if [[ "$stable_observations" -lt 5 ]]; then
 fi
 
 adb shell getprop ro.build.version.sdk | tr -d '\r' | grep -Fxq "$runtime_api"
-if [[ -z "$observed_fingerprint" ]]; then
-  observed_fingerprint="$(
-    adb shell getprop ro.build.fingerprint | tr -d '\r'
-  )"
+observed_fingerprint="$(
+  adb shell getprop ro.build.fingerprint | tr -d '\r'
+)"
+surfaceflinger_pid_initial="$(
+  timeout --signal=TERM --kill-after=5s 10s \
+    adb shell pidof surfaceflinger \
+    | tr -d '\r'
+)"
+test -n "$surfaceflinger_pid_initial"
+renderer_egl="$(adb shell getprop ro.hardware.egl | tr -d '\r')"
+renderer_transport="$(
+  adb shell getprop ro.boot.qemu.gltransport.name | tr -d '\r'
+)"
+luma_sampling="$(
+  adb shell getprop debug.sf.luma_sampling | tr -d '\r'
+)"
+emulator_version="$(
+  grep -m1 -F "Android emulator version" \
+    "$evidence/logs/emulator.log" \
+    | sed -E 's/^[^|]*\|[[:space:]]*//'
+)"
+test -n "$emulator_version"
+
+if [[ "$runtime_api" -eq 37 ]]; then
+  build_id="$(adb shell getprop ro.build.id | tr -d '\r')"
+  debuggable="$(adb shell getprop ro.debuggable | tr -d '\r')"
+  selinux_mode="$(adb shell getenforce | tr -d '\r')"
+  test "$observed_fingerprint" = "$expected_fingerprint"
+  test "$build_id" = "CE2A.260420.019"
+  test "$debuggable" = "1"
+  test "$selinux_mode" = "Enforcing"
+  if [[ -n "$luma_sampling" && "$luma_sampling" != "1" ]]; then
+    echo "Guest luma sampling is not in its stock enabled/default state" >&2
+    exit 1
+  fi
+
+  grep -Fq \
+    "Feature 'GLDMA' (51) is overridden to 'disabled'" \
+    "$evidence/logs/emulator.log"
+  grep -Fq \
+    "Feature 'GLDMA2' (52) is overridden to 'disabled'" \
+    "$evidence/logs/emulator.log"
+  grep -Fq \
+    "gfxstreamFeature:GlDma = 0" \
+    "$evidence/logs/emulator.log"
+  grep -Fq \
+    "gfxstreamFeature:GlDma2 = 0" \
+    "$evidence/logs/emulator.log"
+  if grep -Fq "gfxstreamFeature:GlDma = 1" \
+      "$evidence/logs/emulator.log" \
+      || grep -Fq "gfxstreamFeature:GlDma2 = 1" \
+        "$evidence/logs/emulator.log"; then
+    echo "Emulator DMA graphics feature was re-enabled after override" >&2
+    exit 1
+  fi
+
+  {
+    echo "fingerprint=$observed_fingerprint"
+    echo "build_id=$build_id"
+    echo "selinux=$selinux_mode"
+    echo "renderer_egl=$renderer_egl"
+    echo "renderer_transport=$renderer_transport"
+    echo "emulator=$emulator_version"
+    echo "GLDMA=disabled"
+    echo "GLDMA2=disabled"
+    echo "guest_luma_sampling=${luma_sampling:-default}"
+    echo "surfaceflinger_pid=$surfaceflinger_pid_initial"
+  } > "$evidence/EMULATOR-GRAPHICS-CONFIGURATION.txt"
+  emulator_graphics_workaround="disable-GLDMA-and-GLDMA2"
+  stock_emulator_graphics_feature_configuration=false
 fi
+
+timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
+  > "$evidence/logs/logcat-crash-before-app-gate.txt"
+surfaceflinger_crash_signatures_before="$(
+  grep -Eic \
+    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT" \
+    "$evidence/logs/logcat-crash-before-app-gate.txt" \
+    || true
+)"
+
 # API 26 lacks getconf. Newer runtimes expose the kernel page size directly;
 # this is essential for the Android 17 16-KiB gate because /proc/self/smaps can
 # describe a 4-KiB compatibility mapping even on a 16-KiB kernel.
@@ -502,6 +458,58 @@ for _ in $(seq 1 30); do
 done
 test "$ui_ready" -eq 1
 adb exec-out screencap -p > "$evidence/orkela-android.png"
+python3 - "$evidence/orkela-android.png" \
+  > "$evidence/ORKELA-SCREENSHOT.json" <<'PY'
+import json
+from pathlib import Path
+import struct
+import sys
+import zlib
+
+path = Path(sys.argv[1])
+data = path.read_bytes()
+signature = b"\x89PNG\r\n\x1a\n"
+if len(data) < 45 or not data.startswith(signature):
+    raise SystemExit("screenshot is not a complete PNG")
+
+offset = len(signature)
+chunks = []
+width = height = 0
+while offset < len(data):
+    if offset + 12 > len(data):
+        raise SystemExit("truncated PNG chunk header")
+    length = struct.unpack(">I", data[offset:offset + 4])[0]
+    kind = data[offset + 4:offset + 8]
+    payload_start = offset + 8
+    payload_end = payload_start + length
+    chunk_end = payload_end + 4
+    if chunk_end > len(data):
+        raise SystemExit("truncated PNG chunk payload")
+    expected_crc = struct.unpack(">I", data[payload_end:chunk_end])[0]
+    actual_crc = zlib.crc32(kind + data[payload_start:payload_end])
+    if actual_crc != expected_crc:
+        raise SystemExit(f"invalid PNG CRC for {kind!r}")
+    chunks.append(kind)
+    if len(chunks) == 1:
+        if kind != b"IHDR" or length != 13:
+            raise SystemExit("screenshot has no canonical IHDR")
+        width, height = struct.unpack(">II", data[payload_start:payload_start + 8])
+    offset = chunk_end
+    if kind == b"IEND":
+        break
+
+if width <= 0 or height <= 0:
+    raise SystemExit("screenshot dimensions are invalid")
+if b"IDAT" not in chunks or chunks[-1] != b"IEND" or offset != len(data):
+    raise SystemExit("screenshot has no complete IDAT/IEND sequence")
+print(json.dumps({
+    "schema": 1,
+    "format": "PNG",
+    "width": width,
+    "height": height,
+    "bytes": len(data),
+}, sort_keys=True))
+PY
 grep -Fq 'resource-id="org.scenelith.orkela:id/play_button"' \
   "$evidence/orkela-window.xml"
 
@@ -583,7 +591,7 @@ timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
   > "$evidence/logs/logcat-crash-after-gate.txt"
 surfaceflinger_crash_signatures_after="$(
   grep -Eic \
-    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling" \
+    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling|surfaceflinger.+SIGABRT" \
     "$evidence/logs/logcat-crash-after-gate.txt" \
     || true
 )"
@@ -593,7 +601,7 @@ if [[ "$runtime_api" -eq 37 ]]; then
       adb shell pidof surfaceflinger \
       | tr -d '\r'
   )"
-  test "$surfaceflinger_pid_final" = "$surfaceflinger_pid_after"
+  test "$surfaceflinger_pid_final" = "$surfaceflinger_pid_initial"
   test "$surfaceflinger_crash_signatures_after" \
     -le "$surfaceflinger_crash_signatures_before"
 fi
@@ -606,9 +614,14 @@ jq -n \
   --arg app_sha256 "$app_sha256" \
   --arg test_apk_sha256 "$test_apk_sha256" \
   --arg system_fingerprint "$observed_fingerprint" \
-  --arg compositor_workaround "$compositor_workaround" \
-  --argjson stock_compositor_configuration \
-    "$stock_compositor_configuration" \
+  --arg emulator_version "$emulator_version" \
+  --arg renderer_egl "$renderer_egl" \
+  --arg renderer_transport "$renderer_transport" \
+  --arg emulator_graphics_workaround "$emulator_graphics_workaround" \
+  --argjson stock_android_guest_compositor_configuration \
+    "$stock_android_guest_compositor_configuration" \
+  --argjson stock_emulator_graphics_feature_configuration \
+    "$stock_emulator_graphics_feature_configuration" \
   --argjson surfaceflinger_crash_signatures_before \
     "$surfaceflinger_crash_signatures_before" \
   --argjson surfaceflinger_crash_signatures_after \
@@ -623,8 +636,14 @@ jq -n \
     native_decode: "pass",
     expected_pcm16_sha256: $expected_pcm16_sha256,
     system_fingerprint: $system_fingerprint,
-    compositor_workaround: $compositor_workaround,
-    stock_compositor_configuration: $stock_compositor_configuration,
+    emulator_version: $emulator_version,
+    renderer_egl: $renderer_egl,
+    renderer_transport: $renderer_transport,
+    stock_android_guest_compositor_configuration:
+      $stock_android_guest_compositor_configuration,
+    stock_emulator_graphics_feature_configuration:
+      $stock_emulator_graphics_feature_configuration,
+    emulator_graphics_workaround: $emulator_graphics_workaround,
     surfaceflinger_crash_signatures_before:
       $surfaceflinger_crash_signatures_before,
     surfaceflinger_crash_signatures_after:

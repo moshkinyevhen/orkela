@@ -114,6 +114,13 @@ Local public-pin evidence:
 
 ### Fixed
 
+- Android 17 emulator gates now disable the inconsistent emulator-only GLDMA
+  and GLDMA2 graphics transports before guest boot while leaving the Android
+  compositor and RegionSampling enabled. Exact feature-state, SurfaceFlinger
+  lifetime, crash-delta, and CRC-valid screenshot evidence is mandatory.
+- Android 17 16-KiB page-size validation now uses the kernel-facing
+  `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
+  because compatibility mappings can report 4 KiB on a 16-KiB kernel.
 - Composite Resonith files no longer fail with `Resonith preflight: bad magic`.
 - Long recordings no longer require a complete PCM allocation before the Play
   command becomes available.

@@ -39,7 +39,12 @@ The report records input filenames, complete sizes, and SHA-256 hashes.
     that exact APK and its exact instrumentation APK on API 26 and API 37
     with 4 KiB pages and on API 37 with 16 KiB pages. Every boundary runtime
     must reproduce the pinned PCM16 SHA-256 and retain no WAV or decoded-PCM
-    filesystem artifact.
+    filesystem artifact. Any emulator-only graphics workaround must be
+    restricted to an exact image fingerprint/build, applied before guest boot,
+    and recorded as an effective feature state. It must not modify the Android
+    guest compositor. The gate must additionally preserve one SurfaceFlinger
+    PID, add no mapper/RegionSampling crash signature, and produce a
+    dimensioned PNG whose complete chunk chain and CRCs validate.
 12. Build the Windows x64 and ARM64 installers from the matching native
     payloads. On x64, install silently into an isolated current-user location,
     verify version/architecture/uninstall/ProgID state, uninstall, and require
