@@ -126,6 +126,11 @@ Local public-pin evidence:
   SwiftShader, swangle/SwiftShader, and swangle/lavapipe cell on official
   Emulator 37.1.10 and 37.2.1 archives. Release promotion remains blocked; the
   reducer emitted no stage-one candidate or promotion identity.
+- The next Android 17 causal probe now compares Emulator 37.2.1 with
+  `VulkanNativeSwapchain` off and on in one run. It independently validates
+  the effective host-feature state, allowlisted renderer tuple, target crash
+  evidence, GitHub runner image/run/kernel identity, and the unchanged guest
+  contract before any result can enter the cold-boot APK gate.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.

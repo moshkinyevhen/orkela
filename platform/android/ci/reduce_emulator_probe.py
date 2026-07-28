@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ GUEST_FINGERPRINT = (
     "CE2A.260420.019/15611780:userdebug/dev-keys"
 )
 
-EXPECTED: dict[str, dict[str, Any]] = {
+ARCHIVE_EXPECTED: dict[str, dict[str, Any]] = {
     "control-36_6_11-swiftshader": {
         "renderer": "swiftshader",
         "revision": "36.6.11",
@@ -103,13 +104,117 @@ EXPECTED: dict[str, dict[str, Any]] = {
     },
 }
 
-PROMOTION_ORDER = (
+ARCHIVE_PROMOTION_ORDER = (
     "candidate-37_2_1-swiftshader",
     "candidate-37_2_1-swangle",
     "candidate-37_2_1-lavapipe",
     "candidate-37_1_10-swiftshader",
     "candidate-37_1_10-swangle",
     "candidate-37_1_10-lavapipe",
+)
+
+VULKAN_SWAPCHAIN_EXPECTED: dict[str, dict[str, Any]] = {
+    cell_id: {
+        "renderer": renderer,
+        "revision": "37.2.1",
+        "build_id": 15875889,
+        "binary_version": "37.2.1.0",
+        "archive_sha1": "1c39ceb4bca042b973344d252a051189d367ab83",
+        "archive_sha256": (
+            "3fb1f765795b284f864b9b3403d1c5e1"
+            "ad0f317eb6522441460001ff660d3d7d"
+        ),
+        "archive_size": 346539649,
+        "feature_profile": feature_profile,
+        "vulkan_native_swapchain": feature_state,
+        "allow_unsupported_feature": feature_state == 1,
+    }
+    for cell_id, renderer, feature_profile, feature_state in (
+        (
+            "control-37_2_1-swiftshader-feature-off",
+            "swiftshader",
+            "default",
+            0,
+        ),
+        (
+            "candidate-37_2_1-swiftshader-vulkan-swapchain",
+            "swiftshader",
+            "vulkan-native-swapchain",
+            1,
+        ),
+        (
+            "candidate-37_2_1-swangle-vulkan-swapchain",
+            "swangle",
+            "vulkan-native-swapchain",
+            1,
+        ),
+        (
+            "candidate-37_2_1-lavapipe-vulkan-swapchain",
+            "lavapipe",
+            "vulkan-native-swapchain",
+            1,
+        ),
+    )
+}
+
+VULKAN_SWAPCHAIN_PROMOTION_ORDER = (
+    "candidate-37_2_1-swiftshader-vulkan-swapchain",
+    "candidate-37_2_1-swangle-vulkan-swapchain",
+    "candidate-37_2_1-lavapipe-vulkan-swapchain",
+)
+
+# Kept as the public module alias used by the archive-matrix unit fixtures.
+EXPECTED = ARCHIVE_EXPECTED
+PROMOTION_ORDER = ARCHIVE_PROMOTION_ORDER
+
+MATRICES = {
+    "archive": {
+        "expected": ARCHIVE_EXPECTED,
+        "control": "control-36_6_11-swiftshader",
+        "promotion_order": ARCHIVE_PROMOTION_ORDER,
+        "scope": (
+            "This exact GitHub runner, Android 17 guest hash set, "
+            "Emulator archive matrix, and requested renderer set"
+        ),
+    },
+    "vulkan-native-swapchain": {
+        "expected": VULKAN_SWAPCHAIN_EXPECTED,
+        "control": "control-37_2_1-swiftshader-feature-off",
+        "promotion_order": VULKAN_SWAPCHAIN_PROMOTION_ORDER,
+        "scope": (
+            "This exact GitHub Linux runner, Android 17 guest hash set, "
+            "Emulator 37.2.1 archive, renderer set, and documented "
+            "VulkanNativeSwapchain host feature"
+        ),
+    },
+}
+
+EXPECTED_RENDERER_LINES = {
+    "swiftshader": (
+        "setCurrentRenderer: swiftshader swiftshader "
+        "gles:Swiftshader Indirect vulkan:Swiftshader Indirect"
+    ),
+    "swangle": (
+        "setCurrentRenderer: swangle swiftshader "
+        "gles:Angle Indirect vulkan:Swiftshader Indirect"
+    ),
+    "lavapipe": (
+        "setCurrentRenderer: swangle lavapipe "
+        "gles:Angle Indirect vulkan:Lavapipe"
+    ),
+}
+
+HOST_IDENTITY_FIELDS = (
+    "runner_os",
+    "runner_arch",
+    "image_os",
+    "image_version",
+    "github_run_id",
+    "github_run_attempt",
+    "github_sha",
+    "kernel_release",
+    "machine",
+    "kvm_access",
 )
 
 
@@ -125,12 +230,20 @@ def archive_url(build_id: int) -> str:
     )
 
 
-def validate_result(result: dict[str, Any]) -> None:
+def validate_result(
+    result: dict[str, Any],
+    expected_matrix: dict[str, dict[str, Any]] = EXPECTED,
+) -> None:
     cell_id = result.get("cell_id")
-    require(cell_id in EXPECTED, f"unexpected cell ID: {cell_id!r}")
-    expected = EXPECTED[cell_id]
+    require(
+        cell_id in expected_matrix,
+        f"unexpected cell ID: {cell_id!r}",
+    )
+    expected = expected_matrix[cell_id]
     emulator = result["emulator"]
     guest = result["guest"]
+    host_feature = result["host_feature"]
+    host = result["host"]
 
     require(result["schema"] == 1, f"{cell_id}: schema mismatch")
     require(
@@ -196,13 +309,82 @@ def validate_result(result: dict[str, Any]) -> None:
         f"{cell_id}: effective renderer tuple is not singular",
     )
     require(
-        bool(result["effective_renderer_line"]),
-        f"{cell_id}: effective renderer tuple is missing",
+        result["effective_renderer_line"]
+        == EXPECTED_RENDERER_LINES[expected["renderer"]],
+        f"{cell_id}: effective renderer tuple is not allowlisted",
     )
     require(
         result["crash_evidence_complete"],
         f"{cell_id}: crash evidence is incomplete",
     )
+    expected_feature_profile = expected.get("feature_profile", "default")
+    expected_feature_state = expected.get("vulkan_native_swapchain", 0)
+    require(
+        host_feature["profile"] == expected_feature_profile,
+        f"{cell_id}: requested host-feature profile mismatch",
+    )
+    require(
+        host_feature["requested_vulkan_native_swapchain"]
+        == expected_feature_state,
+        f"{cell_id}: requested VulkanNativeSwapchain state mismatch",
+    )
+    require(
+        host_feature["effective_state_count"] == 1,
+        f"{cell_id}: host-feature state is not singular",
+    )
+    effective_feature_state = host_feature[
+        "effective_vulkan_native_swapchain"
+    ]
+    require(
+        effective_feature_state in {0, 1},
+        f"{cell_id}: invalid effective VulkanNativeSwapchain state",
+    )
+    if expected.get("allow_unsupported_feature", False):
+        require(
+            host_feature["exact"]
+            == (effective_feature_state == expected_feature_state),
+            f"{cell_id}: host-feature exactness is contradictory",
+        )
+    else:
+        require(
+            effective_feature_state == expected_feature_state,
+            f"{cell_id}: effective VulkanNativeSwapchain state mismatch",
+        )
+        require(
+            host_feature["exact"],
+            f"{cell_id}: host-feature state is inexact",
+        )
+    require(host["runner_os"] == "Linux", f"{cell_id}: runner OS mismatch")
+    require(host["runner_arch"] == "X64", f"{cell_id}: runner arch mismatch")
+    require(
+        host["image_os"] not in {"", "missing"},
+        f"{cell_id}: runner image OS is missing",
+    )
+    require(
+        host["image_version"] not in {"", "missing"},
+        f"{cell_id}: runner image version is missing",
+    )
+    require(
+        str(host["github_run_id"]).isdigit(),
+        f"{cell_id}: GitHub run ID is invalid",
+    )
+    require(
+        str(host["github_run_attempt"]).isdigit(),
+        f"{cell_id}: GitHub run attempt is invalid",
+    )
+    require(
+        re.fullmatch(r"[0-9a-f]{40}", str(host["github_sha"])) is not None,
+        f"{cell_id}: GitHub source SHA is invalid",
+    )
+    require(
+        host["kernel_release"] not in {"", "missing"},
+        f"{cell_id}: host kernel release is missing",
+    )
+    require(
+        host["machine"] == "x86_64",
+        f"{cell_id}: host machine mismatch",
+    )
+    require(host["kvm_access"], f"{cell_id}: KVM access is missing")
     require(result["boot_completed"], f"{cell_id}: boot did not complete")
     require(
         result["environment_exact"],
@@ -237,35 +419,101 @@ def main() -> int:
     assessment_path = Path(sys.argv[2])
     promotion_path = Path(sys.argv[3])
     paths = sorted(artifact_root.glob("**/PROBE-RESULT.json"))
+    raw_results = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in paths
+    ]
+    observed_cells = [result.get("cell_id") for result in raw_results]
     require(
-        len(paths) == len(EXPECTED),
-        f"expected {len(EXPECTED)} results, found {len(paths)}",
+        len(observed_cells) == len(set(observed_cells)),
+        "duplicate cell ID",
     )
+    matrix_matches = [
+        (name, matrix)
+        for name, matrix in MATRICES.items()
+        if set(observed_cells) == set(matrix["expected"])
+        and len(observed_cells) == len(matrix["expected"])
+    ]
+    require(
+        len(matrix_matches) == 1,
+        f"unknown exact cell set: {sorted(str(cell) for cell in observed_cells)}",
+    )
+    matrix_name, matrix = matrix_matches[0]
+    expected_matrix = matrix["expected"]
 
     results: dict[str, dict[str, Any]] = {}
-    for path in paths:
-        result = json.loads(path.read_text(encoding="utf-8"))
-        validate_result(result)
+    for result in raw_results:
+        validate_result(result, expected_matrix)
         cell_id = result["cell_id"]
-        require(cell_id not in results, f"duplicate cell ID: {cell_id}")
         results[cell_id] = result
-    require(set(results) == set(EXPECTED), "exact cell set mismatch")
+    require(set(results) == set(expected_matrix), "exact cell set mismatch")
 
-    control = results["control-36_6_11-swiftshader"]
+    first_cell = next(iter(expected_matrix))
+    host_identity = {
+        field: results[first_cell]["host"][field]
+        for field in HOST_IDENTITY_FIELDS
+    }
+    for cell_id, result in results.items():
+        observed_identity = {
+            field: result["host"][field]
+            for field in HOST_IDENTITY_FIELDS
+        }
+        require(
+            observed_identity == host_identity,
+            f"{cell_id}: GitHub runner image identity mismatch",
+        )
+
+    control = results[matrix["control"]]
+    control_soak = control["soak"]
+    crash_failure_recorded = any(
+        failure.startswith("surfaceflinger-crash-signatures:")
+        for failure in control["failures"]
+    )
+    control_is_observably_unstable = (
+        control_soak["healthy_observations"]
+        < control_soak["observations"]
+        or control_soak["pid_changes"] > 0
+        or (
+            control_soak["final_surfaceflinger_pid"]
+            != control_soak["initial_surfaceflinger_pid"]
+        )
+        or control_soak["valid_screenshots"] < 4
+    )
     control_reproduced = (
         control["environment_exact"]
         and control["crash_evidence_complete"]
         and control["known_control_crash_reproduced"]
         and control["known_failing_tuple"]
+        and control["host_feature"]["exact"]
+        and (
+            control["host_feature"]["effective_vulkan_native_swapchain"]
+            == 0
+        )
+        and control_soak["observations"] == 24
+        and control_soak["crash_signatures"] > 0
+        and control_soak["target_crash_signatures"] > 0
+        and crash_failure_recorded
+        and control_is_observably_unstable
+        and bool(control["failures"])
         and "setCurrentRenderer: swiftshader swiftshader"
         in control["effective_renderer_line"]
         and not control["stable"]
     )
     candidates = [
         cell_id
-        for cell_id in PROMOTION_ORDER
+        for cell_id in matrix["promotion_order"]
         if (
             results[cell_id]["environment_exact"]
+            and results[cell_id]["host_feature"]["exact"]
+            and (
+                results[cell_id]["host_feature"][
+                    "effective_vulkan_native_swapchain"
+                ]
+                == expected_matrix[cell_id].get(
+                    "vulkan_native_swapchain",
+                    0,
+                )
+            )
             and results[cell_id]["stable"]
             and results[cell_id]["stage1_candidate"]
             and not results[cell_id]["known_failing_tuple"]
@@ -286,10 +534,9 @@ def main() -> int:
     ]
     assessment = {
         "schema": 1,
-        "scope": (
-            "This exact GitHub runner, Android 17 guest hash set, "
-            "Emulator archive matrix, and requested renderer set"
-        ),
+        "matrix": matrix_name,
+        "scope": matrix["scope"],
+        "host_identity": host_identity,
         "control_reproduced": control_reproduced,
         "stage1_candidates": candidates,
         "results": results,
@@ -299,7 +546,7 @@ def main() -> int:
         encoding="utf-8",
     )
     if not control_reproduced:
-        raise SystemExit("exact 36.6.11 control crash was not reproduced")
+        raise SystemExit("exact same-run control crash was not reproduced")
     if not candidates:
         raise SystemExit(
             "no Stage-1 candidate in this exact run/runner/guest matrix"
@@ -316,6 +563,8 @@ def main() -> int:
         },
         "requested_renderer": selected["renderer"],
         "effective_renderer": selected["effective_renderer_line"],
+        "host_feature": selected["host_feature"],
+        "host": selected["host"],
         "required_next_gate": {
             "cold_4k_boots": 3,
             "cold_16k_boots": 3,

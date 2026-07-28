@@ -5,7 +5,7 @@
 
 set -u -o pipefail
 
-renderer="${1:?usage: probe_renderer.sh <renderer> [cell-id]}"
+renderer="${1:?usage: probe_renderer.sh <renderer> [cell-id] [feature-profile]}"
 case "$renderer" in
   swiftshader|lavapipe|swangle|host) ;;
   *)
@@ -18,6 +18,19 @@ if [[ ! "$cell_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   echo "Unsafe probe cell ID: $cell_id" >&2
   exit 2
 fi
+feature_profile="${3:-default}"
+case "$feature_profile" in
+  default)
+    requested_vulkan_native_swapchain=0
+    ;;
+  vulkan-native-swapchain)
+    requested_vulkan_native_swapchain=1
+    ;;
+  *)
+    echo "Unsupported Emulator feature profile: $feature_profile" >&2
+    exit 2
+    ;;
+esac
 
 system_image="system-images;android-37.0;google_apis;x86_64"
 expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
@@ -51,6 +64,7 @@ observations=0
 healthy_observations=0
 pid_changes=0
 crash_signatures=0
+target_crash_signatures=0
 valid_screenshots=0
 initial_surfaceflinger_pid=""
 final_surfaceflinger_pid=""
@@ -59,7 +73,11 @@ observed_selinux=""
 observed_luma=""
 observed_page_size=""
 effective_renderer_line=""
+effective_feature_count=0
+effective_vulkan_native_swapchain=""
+feature_exact=false
 known_failing_tuple=false
+known_failure_identity=false
 stage1_candidate=false
 known_control_crash_reproduced=false
 control_crash_signature_reproduced=false
@@ -69,9 +87,34 @@ post_soak_log_ok=false
 luma_query_ok=false
 display_width=0
 display_height=0
+runner_os="${RUNNER_OS:-missing}"
+runner_arch="${RUNNER_ARCH:-missing}"
+image_os="${ImageOS:-missing}"
+image_version="${ImageVersion:-missing}"
+github_run_id="${GITHUB_RUN_ID:-missing}"
+github_run_attempt="${GITHUB_RUN_ATTEMPT:-missing}"
+github_sha="${GITHUB_SHA:-missing}"
+host_kernel_release="$(uname -r)"
+host_machine="$(uname -m)"
+kvm_access=false
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+  kvm_access=true
+fi
 
 mkdir -p "$evidence/logs" "$evidence/screenshots" "$ANDROID_AVD_HOME"
 : > "$failure_file"
+{
+  echo "runner_os=$runner_os"
+  echo "runner_arch=$runner_arch"
+  echo "image_os=$image_os"
+  echo "image_version=$image_version"
+  echo "github_run_id=$github_run_id"
+  echo "github_run_attempt=$github_run_attempt"
+  echo "github_sha=$github_sha"
+  echo "kernel_release=$host_kernel_release"
+  echo "machine=$host_machine"
+  echo "kvm_access=$kvm_access"
+} > "$evidence/HOST-IDENTITY.txt"
 printf '%s\n' \
   "utc,index,elapsed_seconds,healthy,surfaceflinger_pid,package,surfaceflinger,mount,storage" \
   > "$observations_file"
@@ -138,18 +181,27 @@ if [[ "$?" -ne 0 ]]; then
 fi
 
 adb start-server > "$evidence/logs/adb-start-server.txt" 2>&1 || true
-"$emulator_bin" "@$avd_name" \
-  -no-window \
-  -no-boot-anim \
-  -no-snapshot \
-  -no-audio \
-  -accel on \
-  -cores 2 \
-  -memory 4096 \
-  -partition-size 4096 \
-  -gpu "$renderer" \
-  -port "$emulator_console_port" \
-  -verbose \
+emulator_args=(
+  "@$avd_name"
+  -no-window
+  -no-boot-anim
+  -no-snapshot
+  -no-audio
+  -accel on
+  -cores 2
+  -memory 4096
+  -partition-size 4096
+  -gpu "$renderer"
+  -port "$emulator_console_port"
+  -verbose
+)
+if [[ "$feature_profile" == "vulkan-native-swapchain" ]]; then
+  emulator_args+=(-feature VulkanNativeSwapchain)
+fi
+printf '%q ' "$emulator_bin" "${emulator_args[@]}" \
+  > "$evidence/EMULATOR-COMMAND.txt"
+printf '\n' >> "$evidence/EMULATOR-COMMAND.txt"
+"$emulator_bin" "${emulator_args[@]}" \
   > "$evidence/logs/emulator.log" 2>&1 &
 emulator_pid="$!"
 
@@ -254,6 +306,8 @@ if [[ "$boot_completed" == "true" ]]; then
   {
     echo "cell_id=$cell_id"
     echo "requested_renderer=$renderer"
+    echo "requested_feature_profile=$feature_profile"
+    echo "requested_vulkan_native_swapchain=$requested_vulkan_native_swapchain"
     echo "fingerprint=$observed_fingerprint"
     echo "selinux=$observed_selinux"
     echo "luma_sampling=${observed_luma:-default}"
@@ -431,6 +485,19 @@ if [[ "$boot_completed" == "true" ]]; then
         "$evidence/logs/logcat-soak.txt" || true
     } | awk '{ total += $1 } END { print total + 0 }'
   )"
+  target_crash_signatures="$(
+    {
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma' \
+        "$evidence/logs/emulator.log" || true
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma' \
+        "$evidence/logs/logcat-pre-soak.txt" || true
+      grep -Eic \
+        'GoldfishMapper::readFromHost|hasReadColorBufferDma' \
+        "$evidence/logs/logcat-soak.txt" || true
+    } | awk '{ total += $1 } END { print total + 0 }'
+  )"
   if [[ "$crash_evidence_complete" == "true" ]] \
       && grep -Fq \
       "GoldfishMapper::readFromHost" \
@@ -491,6 +558,29 @@ effective_renderer_line="$(
 if [[ "$effective_renderer_count" -ne 1 ]]; then
   record_failure "effective-renderer-tuple-count:$effective_renderer_count"
 fi
+grep -E \
+  'gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*[01][[:space:]]*$' \
+  "$evidence/logs/emulator.log" \
+  > "$evidence/HOST-FEATURE-STATE.txt" || true
+effective_feature_count="$(
+  awk 'NF { count += 1 } END { print count + 0 }' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_vulkan_native_swapchain="$(
+  sed -n \
+    's/^.*gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+if [[ "$effective_feature_count" -ne 1 ]]; then
+  record_failure \
+    "vulkan-native-swapchain-state-count:$effective_feature_count"
+elif [[ "$effective_vulkan_native_swapchain" \
+    != "$requested_vulkan_native_swapchain" ]]; then
+  record_failure \
+    "vulkan-native-swapchain-state:$effective_vulkan_native_swapchain:expected:$requested_vulkan_native_swapchain"
+else
+  feature_exact=true
+fi
 # A known failure is scoped by the full causal environment. A newer Emulator
 # remains eligible even when it reports the same human-readable renderer tuple.
 if [[ ( "$cell_id" == "control-36_6_11-swiftshader" \
@@ -499,6 +589,18 @@ if [[ ( "$cell_id" == "control-36_6_11-swiftshader" \
     && "$emulator_version" == "36.6.11.0" \
     && "$archive_sha256" == \
       "1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830" \
+    && "$effective_vulkan_native_swapchain" == "0" ]]; then
+  known_failure_identity=true
+fi
+if [[ "$cell_id" == "control-37_2_1-swiftshader-feature-off" \
+    && "$renderer" == "swiftshader" \
+    && "$emulator_version" == "37.2.1.0" \
+    && "$archive_sha256" == \
+      "3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d" \
+    && "$effective_vulkan_native_swapchain" == "0" ]]; then
+  known_failure_identity=true
+fi
+if [[ "$known_failure_identity" == "true" \
     && "${ORKELA_GUEST_HASH_SET:-missing}" == \
       "android17-r06-google-apis-x86_64-4k-v1" \
     && "$effective_renderer_count" -eq 1 ]] \
@@ -538,6 +640,21 @@ fi
 
 CELL_ID="$cell_id" \
 RENDERER="$renderer" \
+FEATURE_PROFILE="$feature_profile" \
+REQUESTED_VULKAN_NATIVE_SWAPCHAIN="$requested_vulkan_native_swapchain" \
+EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN="$effective_vulkan_native_swapchain" \
+EFFECTIVE_FEATURE_COUNT="$effective_feature_count" \
+FEATURE_EXACT="$feature_exact" \
+RUNNER_OS_VALUE="$runner_os" \
+RUNNER_ARCH_VALUE="$runner_arch" \
+IMAGE_OS_VALUE="$image_os" \
+IMAGE_VERSION_VALUE="$image_version" \
+GITHUB_RUN_ID_VALUE="$github_run_id" \
+GITHUB_RUN_ATTEMPT_VALUE="$github_run_attempt" \
+GITHUB_SHA_VALUE="$github_sha" \
+HOST_KERNEL_RELEASE="$host_kernel_release" \
+HOST_MACHINE="$host_machine" \
+KVM_ACCESS="$kvm_access" \
 EXPECTED_EMULATOR_VERSION="$expected_emulator_version" \
 EMULATOR_VERSION="$emulator_version" \
 ARCHIVE_REVISION="$archive_revision" \
@@ -563,6 +680,7 @@ PID_CHANGES="$pid_changes" \
 INITIAL_SURFACEFLINGER_PID="$initial_surfaceflinger_pid" \
 FINAL_SURFACEFLINGER_PID="$final_surfaceflinger_pid" \
 CRASH_SIGNATURES="$crash_signatures" \
+TARGET_CRASH_SIGNATURES="$target_crash_signatures" \
 VALID_SCREENSHOTS="$valid_screenshots" \
 EFFECTIVE_RENDERER_LINE="$effective_renderer_line" \
 EFFECTIVE_RENDERER_COUNT="$effective_renderer_count" \
@@ -570,8 +688,7 @@ KNOWN_FAILING_TUPLE="$known_failing_tuple" \
 STAGE1_CANDIDATE="$stage1_candidate" \
 KNOWN_CONTROL_CRASH_REPRODUCED="$known_control_crash_reproduced" \
 EXPECTED_CONTROL_FAILURE="$(
-  if [[ "$cell_id" == "control-36_6_11-swiftshader" \
-      || "$cell_id" == "swiftshader" ]]; then
+  if [[ "$cell_id" == control-* || "$cell_id" == "swiftshader" ]]; then
     echo true
   else
     echo false
@@ -604,6 +721,31 @@ print(json.dumps({
     "renderer": os.environ["RENDERER"],
     "effective_renderer_line": os.environ["EFFECTIVE_RENDERER_LINE"],
     "effective_renderer_count": int(os.environ["EFFECTIVE_RENDERER_COUNT"]),
+    "host_feature": {
+        "profile": os.environ["FEATURE_PROFILE"],
+        "requested_vulkan_native_swapchain": int(
+            os.environ["REQUESTED_VULKAN_NATIVE_SWAPCHAIN"]
+        ),
+        "effective_vulkan_native_swapchain": int(
+            os.environ["EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN"] or -1
+        ),
+        "effective_state_count": int(
+            os.environ["EFFECTIVE_FEATURE_COUNT"]
+        ),
+        "exact": boolean("FEATURE_EXACT"),
+    },
+    "host": {
+        "runner_os": os.environ["RUNNER_OS_VALUE"],
+        "runner_arch": os.environ["RUNNER_ARCH_VALUE"],
+        "image_os": os.environ["IMAGE_OS_VALUE"],
+        "image_version": os.environ["IMAGE_VERSION_VALUE"],
+        "github_run_id": os.environ["GITHUB_RUN_ID_VALUE"],
+        "github_run_attempt": os.environ["GITHUB_RUN_ATTEMPT_VALUE"],
+        "github_sha": os.environ["GITHUB_SHA_VALUE"],
+        "kernel_release": os.environ["HOST_KERNEL_RELEASE"],
+        "machine": os.environ["HOST_MACHINE"],
+        "kvm_access": boolean("KVM_ACCESS"),
+    },
     "expected_control_failure": boolean("EXPECTED_CONTROL_FAILURE"),
     "known_control_crash_reproduced": boolean(
         "KNOWN_CONTROL_CRASH_REPRODUCED"
@@ -644,6 +786,9 @@ print(json.dumps({
         "final_surfaceflinger_pid": os.environ["FINAL_SURFACEFLINGER_PID"],
         "pid_changes": int(os.environ["PID_CHANGES"]),
         "crash_signatures": int(os.environ["CRASH_SIGNATURES"]),
+        "target_crash_signatures": int(
+            os.environ["TARGET_CRASH_SIGNATURES"]
+        ),
         "valid_screenshots": int(os.environ["VALID_SCREENSHOTS"]),
     },
     "failures": failures,

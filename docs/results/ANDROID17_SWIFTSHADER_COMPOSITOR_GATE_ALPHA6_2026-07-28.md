@@ -133,10 +133,47 @@ It must remain an isolated compositor probe until a stage-one candidate exists.
 Only then may that exact identity advance to three cold 4 KiB and three cold
 16 KiB boots with the same Orkela and instrumentation APK pair.
 
+## Causal host-composition experiment
+
+The R-185 red-team review approved one bounded follow-up. Emulator 36.4.9
+introduced Vulkan composition and documents the
+`VulkanNativeSwapchain` feature as a route that can disable host GL usage. That
+is causally relevant because the observed abort occurs in the host GL/readback
+path. It is not accepted as a correction merely because its command-line flag
+was supplied: the complete Emulator log must contain exactly one effective
+`gfxstreamFeature:VulkanNativeSwapchain` state with the requested value.
+
+The same GitHub run contains exactly four Emulator 37.2.1 cells:
+
+- SwiftShader with the feature off, as a fresh failing control;
+- SwiftShader with the documented feature on;
+- swangle/SwiftShader with the documented feature on;
+- swangle/lavapipe with the documented feature on.
+
+Because matrix cells use separate hosted VMs, every result records the GitHub
+run, attempt, source SHA, runner OS/architecture, image OS/version, kernel,
+machine architecture, and KVM access. The reducer rejects the complete matrix
+if any of those identities differ.
+
+No guest property, luma setting, DMA capability, SELinux mode, application, or
+Android image changes between those cells. A feature-on cell is unsupported
+and inconclusive if the effective state remains zero. It is rejected if the
+effective state is one and the compositor still crashes. It becomes only a
+stage-one candidate after 24/24 healthy observations, one invariant
+SurfaceFlinger PID, zero crash signatures, and four valid screenshots.
+
+The review rejected `swiftshader_indirect` because it is deprecated and the
+measured renderer tuple already uses the indirect SwiftShader path. Android
+Test Devices were also rejected for this gate because no official API 37 ATD
+image exists and ATD is not a screenshot-rendering substitute. A pinned
+`macos-26-intel` pure-SwiftShader probe remains an orthogonal fallback only if
+the Linux Vulkan-composition hypothesis is unsupported or rejected.
+
 This follows Android's documented renderer controls and emulator archive:
 
 - [Configure graphics acceleration](https://developer.android.com/studio/run/emulator-acceleration#command-gpu)
 - [Android Emulator graphics troubleshooting](https://developer.android.com/studio/run/emulator-troubleshooting#graphics-issues)
+- [Android Emulator release notes](https://developer.android.com/studio/releases/emulator)
 - [Android Emulator archive](https://developer.android.com/studio/emulator_archive)
 
 ## Publication boundary

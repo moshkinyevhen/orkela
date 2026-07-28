@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      vulkan_swapchain_probe:
+        description: Run only the Android 17 Vulkan composition A/B matrix
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -37,7 +42,11 @@ jobs:
     name: Android API-26/API-37 application
     if: >-
       github.event_name != 'workflow_dispatch'
-      || (inputs.renderer_probe != true && inputs.emulator_probe != true)
+      || (
+        inputs.renderer_probe != true
+        && inputs.emulator_probe != true
+        && inputs.vulkan_swapchain_probe != true
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 110
     steps:
@@ -730,11 +739,159 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  android-vulkan-swapchain-probe:
+    name: Android 17 Vulkan composition / ${{ matrix.cell_id }}
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && inputs.vulkan_swapchain_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell_id: control-37_2_1-swiftshader-feature-off
+            renderer: swiftshader
+            feature_profile: default
+          - cell_id: candidate-37_2_1-swiftshader-vulkan-swapchain
+            renderer: swiftshader
+            feature_profile: vulkan-native-swapchain
+          - cell_id: candidate-37_2_1-swangle-vulkan-swapchain
+            renderer: swangle
+            feature_profile: vulkan-native-swapchain
+          - cell_id: candidate-37_2_1-lavapipe-vulkan-swapchain
+            renderer: lavapipe
+            feature_profile: vulkan-native-swapchain
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Validate probe shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n platform/android/ci/prepare_emulator_probe.sh
+          bash -n platform/android/ci/probe_renderer.sh
+
+      - name: Install exact Android 17 guest and Emulator 37.2.1
+        shell: bash
+        run: |
+          bash platform/android/ci/prepare_emulator_probe.sh \
+            37.2.1 \
+            15875889 \
+            1c39ceb4bca042b973344d252a051189d367ab83 \
+            3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d \
+            346539649 \
+            37.2.1.0
+
+      - name: Probe exact host-composition route
+        shell: bash
+        run: |
+          bash platform/android/ci/probe_renderer.sh \
+            "${{ matrix.renderer }}" \
+            "${{ matrix.cell_id }}" \
+            "${{ matrix.feature_profile }}"
+
+      - name: Upload Vulkan composition evidence
+        if: always()
+        id: upload-vulkan-probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-vulkan-swapchain-${{ matrix.cell_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android37-renderer-probe/${{ matrix.cell_id }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize host-composition result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="build/android37-renderer-probe/${{ matrix.cell_id }}/PROBE-RESULT.json"
+          test -s "$result"
+          {
+            echo "### Android 17 Vulkan composition: ${{ matrix.cell_id }}"
+            echo "- Stable: $(jq -r .stable "$result")"
+            echo "- Stage-1 candidate: $(jq -r .stage1_candidate "$result")"
+            echo "- Same-run control crash: $(jq -r .known_control_crash_reproduced "$result")"
+            echo "- Effective renderer: $(jq -r .effective_renderer_line "$result")"
+            echo "- Requested VulkanNativeSwapchain: $(jq -r .host_feature.requested_vulkan_native_swapchain "$result")"
+            echo "- Effective VulkanNativeSwapchain: $(jq -r .host_feature.effective_vulkan_native_swapchain "$result")"
+            echo "- Exact environment: $(jq -r .environment_exact "$result")"
+            echo "- Healthy observations: $(jq -r .soak.healthy_observations "$result") / 24"
+            echo "- SurfaceFlinger PID changes: $(jq -r .soak.pid_changes "$result")"
+            echo "- Crash signatures: $(jq -r .soak.crash_signatures "$result")"
+            echo "- Valid screenshots: $(jq -r .soak.valid_screenshots "$result") / 4"
+            echo "- Artifact ID: ${{ steps.upload-vulkan-probe.outputs.artifact-id }}"
+            echo "- Diagnostic only: no Orkela APK was installed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-vulkan-swapchain-assessment:
+    name: Android 17 Vulkan composition assessment
+    if: >-
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && inputs.vulkan_swapchain_probe == true
+    needs:
+      - android-vulkan-swapchain-probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out evidence reducer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download every host-composition result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Orkela-Android17-vulkan-swapchain-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-artifacts
+
+      - name: Reduce causal A/B matrix into one evidence verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 platform/android/ci/reduce_emulator_probe.py \
+            probe-artifacts \
+            ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json \
+            PROMOTION-CANDIDATE.json
+          {
+            echo "## Android 17 Vulkan composition assessment"
+            echo "- Same-run control crash reproduced: $(jq -r .control_reproduced ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json)"
+            echo "- Stage-1 candidates: $(jq -r '.stage1_candidates | join(\", \")' ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json)"
+            echo "- Promotion candidate: $(jq -r .cell_id PROMOTION-CANDIDATE.json)"
+            echo "- Next gate: exact archive, tuple, and effective feature state; 3 cold 4K + 3 cold 16K boots; then the exact Orkela APK pair"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload causal assessment and promotion identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-vulkan-swapchain-assessment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ANDROID17-VULKAN-SWAPCHAIN-ASSESSMENT.json
+            PROMOTION-CANDIDATE.json
+          if-no-files-found: warn
+          retention-days: 14
+
   ios:
     name: iOS ${{ matrix.target }}
     if: >-
       github.event_name != 'workflow_dispatch'
-      || (inputs.renderer_probe != true && inputs.emulator_probe != true)
+      || (
+        inputs.renderer_probe != true
+        && inputs.emulator_probe != true
+        && inputs.vulkan_swapchain_probe != true
+      )
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
@@ -1051,7 +1208,11 @@ jobs:
       always()
       && (
         github.event_name != 'workflow_dispatch'
-        || (inputs.renderer_probe != true && inputs.emulator_probe != true)
+        || (
+          inputs.renderer_probe != true
+          && inputs.emulator_probe != true
+          && inputs.vulkan_swapchain_probe != true
+        )
       )
     needs:
       - android
