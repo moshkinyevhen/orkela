@@ -38,8 +38,10 @@ expected_pcm="${EXPECTED_PCM_SHA256:?EXPECTED_PCM_SHA256 is required}"
 emulator_pid=""
 app_sha256="$(sha256sum "$app" | cut -d' ' -f1)"
 test_apk_sha256="$(sha256sum "$test_apk" | cut -d' ' -f1)"
+export ANDROID_USER_HOME="${ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-android-user}"
+export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
 
-mkdir -p "$evidence/logs"
+mkdir -p "$evidence/logs" "$ANDROID_AVD_HOME"
 test -s "$app"
 test -s "$test_apk"
 
@@ -67,13 +69,13 @@ trap cleanup EXIT
   "$system_image"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 command -v adb
-"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
   create avd \
   --force \
   --name "$avd_name" \
   --package "$system_image" \
   --device "pixel_2" \
-  < /dev/null
+  --path "$ANDROID_AVD_HOME/$avd_name.avd"
 "$ANDROID_HOME/emulator/emulator" -list-avds \
   | grep -Fx "$avd_name" > /dev/null
 

@@ -221,6 +221,9 @@ jobs:
                 -name '*.pkg' -print -quit
             )"
             test -n "$package"
+            pkg info -e gtk4
+            pkg info -e gstreamer1
+            pkg info -e gstreamer1-plugins
             pkg info -F "$package"
             pkg add -f "$package"
             test -x /usr/local/bin/orkela

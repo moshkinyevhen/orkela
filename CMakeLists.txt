@@ -452,11 +452,14 @@ elseif(UNIX)
     set(CPACK_FREEBSD_PACKAGE_MAINTAINER "Yevhen Moshkin")
     set(CPACK_FREEBSD_PACKAGE_ORIGIN "audio/orkela")
     set(CPACK_FREEBSD_PACKAGE_CATEGORIES "audio")
+    # CPack 4.4 serializes one string as both the dependency name and origin.
+    # FreeBSD's GTK 4 port has origin x11-toolkits/gtk40 but package name gtk4,
+    # so use the installed package names until CPack can represent both fields.
     set(
         CPACK_FREEBSD_PACKAGE_DEPS
-        "x11-toolkits/gtk40"
-        "multimedia/gstreamer1"
-        "multimedia/gstreamer1-plugins"
+        "gtk4"
+        "gstreamer1"
+        "gstreamer1-plugins"
     )
 
     include(CPack)

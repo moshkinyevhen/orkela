@@ -465,7 +465,7 @@ jobs:
             xcrun simctl get_app_container \
               "$udid" org.scenelith.orkela data
           )"
-          find "$container" -type f -print | sort \
+          find "$container/Documents" -type f -print | sort \
             > "$evidence/APP-DATA-BEFORE.txt"
           SIMCTL_CHILD_ORKELA_CI_SMOKE=1 \
             xcrun simctl launch --terminate-running-process \
@@ -501,7 +501,7 @@ jobs:
             > "$evidence/logs/orkela-ios.log"
           grep -Fq "ORKELA_CI_SMOKE PASS" \
             "$evidence/logs/orkela-ios.log"
-          find "$container" -type f -print | sort \
+          find "$container/Documents" -type f -print | sort \
             > "$evidence/APP-DATA-AFTER.txt"
           comm -13 \
             "$evidence/APP-DATA-BEFORE.txt" \
