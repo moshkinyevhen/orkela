@@ -36,7 +36,7 @@ class UpdateManifestTest(unittest.TestCase):
             manifest = MODULE.build_manifest(
                 version="0.3.0-alpha.6",
                 channel="beta",
-                commit="0123456789abcdef",
+                commit="0123456789abcdef0123456789abcdef01234567",
                 published_at="2026-07-28T12:00:00Z",
                 base_url="https://example.invalid/releases/",
                 artifacts=[
@@ -73,7 +73,7 @@ class UpdateManifestTest(unittest.TestCase):
                 MODULE.build_manifest(
                     version="0.3.0-alpha.6",
                     channel="beta",
-                    commit="0123456789abcdef",
+                    commit="0123456789abcdef0123456789abcdef01234567",
                     published_at="2026-07-28T12:00:00Z",
                     base_url="https://example.invalid/releases",
                     artifacts=[
@@ -89,6 +89,48 @@ class UpdateManifestTest(unittest.TestCase):
                             "arm64",
                             "portable",
                         ),
+                    ],
+                )
+
+    def test_non_https_release_url_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "Orkela.bin"
+            package.write_bytes(b"payload")
+            with self.assertRaisesRegex(ValueError, "HTTPS"):
+                MODULE.build_manifest(
+                    version="0.3.0-alpha.6",
+                    channel="beta",
+                    commit="0" * 40,
+                    published_at="2026-07-28T12:00:00Z",
+                    base_url="http://example.invalid/releases",
+                    artifacts=[
+                        MODULE.Artifact(
+                            package,
+                            "windows",
+                            "x64",
+                            "installer",
+                        )
+                    ],
+                )
+
+    def test_abbreviated_source_commit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "Orkela.bin"
+            package.write_bytes(b"payload")
+            with self.assertRaisesRegex(ValueError, "full SHA-1"):
+                MODULE.build_manifest(
+                    version="0.3.0-alpha.6",
+                    channel="beta",
+                    commit="01234567",
+                    published_at="2026-07-28T12:00:00Z",
+                    base_url="https://example.invalid/releases",
+                    artifacts=[
+                        MODULE.Artifact(
+                            package,
+                            "windows",
+                            "x64",
+                            "installer",
+                        )
                     ],
                 )
 

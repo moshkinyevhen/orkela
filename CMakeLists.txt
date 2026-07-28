@@ -224,6 +224,7 @@ if(WIN32)
         Orkela
         PRIVATE
             Orkela::Session
+            bcrypt
             comdlg32
             d2d1
             dwrite

@@ -27,13 +27,21 @@ jobs:
       - name: Verify tag, version, and source identity
         id: identity
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           version="$(tr -d '\r\n' < VERSION)"
           expected="v$version"
-          test "${{ inputs.tag }}" = "$expected"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          test "$RELEASE_TAG" = "$expected"
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          tag_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
           source_sha="$(git rev-parse HEAD)"
           test -n "$source_sha"
+          test "$tag_sha" = "$source_sha"
           {
             echo "version=$version"
             echo "source_sha=$source_sha"
@@ -78,10 +86,12 @@ jobs:
           windows="$(successful_run windows.yml)"
           desktop="$(successful_run desktop-unix.yml)"
           mobile="$(successful_run mobile.yml)"
+          update_security="$(successful_run update-security.yml)"
           {
             echo "windows=$windows"
             echo "desktop=$desktop"
             echo "mobile=$mobile"
+            echo "update_security=$update_security"
           } >> "$GITHUB_OUTPUT"
 
       - name: Download only product artifacts
@@ -116,6 +126,8 @@ jobs:
 
       - name: Flatten artifacts and reject collisions
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -136,7 +148,7 @@ jobs:
               shutil.copy2(path, destination)
           PY
 
-          version="${{ steps.identity.outputs.version }}"
+          version="$RELEASE_VERSION"
           required=(
             "Orkela-Windows-x64-$version-Setup.exe"
             "Orkela-Windows-arm64-$version-Setup.exe"
@@ -155,21 +167,18 @@ jobs:
       - name: Generate hashes and explicitly unsigned update metadata
         shell: bash
         env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
           SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
         run: |
           set -euo pipefail
-          version="${{ steps.identity.outputs.version }}"
+          version="$RELEASE_VERSION"
           base_url="$(
             printf \
               'https://github.com/%s/releases/download/%s' \
               "$GITHUB_REPOSITORY" \
-              "${{ inputs.tag }}"
+              "$RELEASE_TAG"
           )"
-          android="$(
-            find release-assets -maxdepth 1 -type f \
-              -name 'Orkela-Android-*.tar.gz' -print -quit
-          )"
-
           python3 tools/release/generate_update_manifest.py \
             --version-file VERSION \
             --channel beta \
@@ -190,7 +199,6 @@ jobs:
               "release-assets/Orkela-macOS-arm64-$version.pkg:macos:arm64:pkg" \
             --artifact \
               "release-assets/Orkela-macOS-x86_64-$version.pkg:macos:x86_64:pkg" \
-            --artifact "$android:android:multi:tested-debug-bundle" \
             --output release-assets/orkela-update-v1.unsigned.json
 
           (
@@ -206,19 +214,22 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
         run: |
           set -euo pipefail
-          if gh release view "${{ inputs.tag }}" \
+          if gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
           then
-            echo "Release ${{ inputs.tag }} already exists; refusing overwrite"
+            echo "Release $RELEASE_TAG already exists; refusing overwrite"
             exit 1
           fi
 
           cat > release-notes.md <<EOF
-          Orkela ${{ steps.identity.outputs.version }} validated alpha.
+          Orkela $RELEASE_VERSION validated alpha.
 
-          Source commit: \`${{ steps.identity.outputs.source_sha }}\`
+          Source commit: \`$SOURCE_SHA\`
 
           The Windows, Ubuntu, Debian, FreeBSD, macOS, and Android artifacts
           were collected only from successful required workflows for this
@@ -234,9 +245,21 @@ jobs:
           mapfile -d '' assets < <(
             find release-assets -maxdepth 1 -type f -print0 | sort -z
           )
-          gh release create "${{ inputs.tag }}" \
+          remote_tag_sha="$(
+            git ls-remote origin "refs/tags/$RELEASE_TAG" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          remote_peeled_sha="$(
+            git ls-remote origin "refs/tags/$RELEASE_TAG^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          remote_source_sha="${remote_peeled_sha:-$remote_tag_sha}"
+          test -n "$remote_source_sha"
+          test "$remote_source_sha" = "$SOURCE_SHA"
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Orkela ${{ steps.identity.outputs.version }}" \
+            --verify-tag \
+            --title "Orkela $RELEASE_VERSION" \
             --notes-file release-notes.md \
             --prerelease \
             "${assets[@]}"

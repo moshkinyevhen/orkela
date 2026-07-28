@@ -87,6 +87,28 @@ Local public-pin evidence:
   tag only after successful Windows, desktop Unix/Apple, and mobile workflows
   exist for the exact source commit. The old x64-only tag publisher was
   removed.
+- TUF 1.0 authenticated-update repository tooling based on Python-TUF 7.0.0,
+  with 2-of-3 root and targets signatures, short-lived timestamp/snapshot
+  roles, consistent snapshots, and hash-locked release dependencies.
+- Hostile-client update gates covering signed rollback, expired/frozen
+  metadata, mix-and-match metadata, insufficient signing keys, non-HTTPS
+  inventory URLs, abbreviated source identities, and corrupt target bytes.
+- Native Windows ARM64 CI on `windows-11-arm`, including C++ tests, playback,
+  PE machine validation, installed application launch, and isolated
+  install/uninstall instead of x64 cross-build-only evidence.
+- Installed Windows `--self-test` mode with bounded completion, complete
+  Resonith decoding, deterministic PCM fingerprint evidence, tested-build
+  hash equality, and fail-closed uninstall residue checks.
+- Transactional TUF client-state verification under an OS advisory lock:
+  rejected channel, architecture, version, metadata, or target candidates
+  cannot mutate the previously trusted state.
+- Signed contiguous release history, persisted anti-equivocation ledger,
+  dual-threshold root-rotation tests, channel-bounded metadata lifetimes, and
+  explicit production rejection of development test roots.
+- Independent online snapshot/timestamp renewal with versions decoupled from
+  application releases, cumulative signed skip/fork history, crash-journal
+  recovery, selector-aware artifact identities, and fail-closed refresh around
+  expired targets or repositories overlapping private signer custody.
 
 ### Changed
 
@@ -111,6 +133,9 @@ Local public-pin evidence:
   media representation.
 - Windows executable and installer version resources now agree with
   `VERSION` at `0.3.0-alpha.6`.
+- The release assembler now requires an existing exact `refs/tags/...` tag
+  whose peeled commit equals the checked-out source; a matching branch or
+  version string cannot create release authority.
 
 ### Fixed
 

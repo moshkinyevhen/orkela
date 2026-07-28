@@ -3,11 +3,13 @@
 #include "wave_player.h"
 
 #include "orkela/localization.h"
+#include "orkela/resonith_pull_decoder.h"
 #include "orkela/visual_analysis.h"
 
 #include "../resources/resource.h"
 
 #include <commdlg.h>
+#include <bcrypt.h>
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwmapi.h>
@@ -26,11 +28,15 @@
 #include <cstdint>
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -47,6 +53,215 @@ constexpr UINT animation_interval_ms = 16U;
 constexpr float design_dpi = 96.0F;
 constexpr std::size_t scope_column_count = 320U;
 constexpr std::size_t command_page_count = 12U;
+
+std::uint64_t update_pcm_hash(
+    std::uint64_t hash,
+    std::span<const std::int16_t> samples
+) noexcept {
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    for (const std::int16_t sample : samples) {
+        const auto bits = static_cast<std::uint16_t>(sample);
+        hash ^= static_cast<std::uint8_t>(bits & 0xFFU);
+        hash *= prime;
+        hash ^= static_cast<std::uint8_t>(bits >> 8U);
+        hash *= prime;
+    }
+    return hash;
+}
+
+class sha256_accumulator {
+public:
+    sha256_accumulator() {
+        DWORD object_bytes = 0U;
+        DWORD result_bytes = 0U;
+        if (
+            BCryptOpenAlgorithmProvider(
+                &algorithm_,
+                BCRYPT_SHA256_ALGORITHM,
+                nullptr,
+                0U
+            ) != 0
+            || BCryptGetProperty(
+                algorithm_,
+                BCRYPT_OBJECT_LENGTH,
+                reinterpret_cast<PUCHAR>(&object_bytes),
+                sizeof(object_bytes),
+                &result_bytes,
+                0U
+            ) != 0
+        ) {
+            return;
+        }
+        object_.resize(object_bytes);
+        ready_ = BCryptCreateHash(
+            algorithm_,
+            &hash_,
+            object_.data(),
+            static_cast<ULONG>(object_.size()),
+            nullptr,
+            0U,
+            0U
+        ) == 0;
+    }
+
+    sha256_accumulator(const sha256_accumulator&) = delete;
+    sha256_accumulator& operator=(const sha256_accumulator&) = delete;
+
+    ~sha256_accumulator() {
+        if (hash_ != nullptr) {
+            BCryptDestroyHash(hash_);
+        }
+        if (algorithm_ != nullptr) {
+            BCryptCloseAlgorithmProvider(algorithm_, 0U);
+        }
+    }
+
+    bool update(std::span<const std::int16_t> samples) {
+        if (!ready_) {
+            return false;
+        }
+        return BCryptHashData(
+            hash_,
+            reinterpret_cast<PUCHAR>(
+                const_cast<std::int16_t*>(samples.data())
+            ),
+            static_cast<ULONG>(samples.size_bytes()),
+            0U
+        ) == 0;
+    }
+
+    std::optional<std::string> finish() {
+        std::array<UCHAR, 32U> digest{};
+        if (
+            !ready_
+            || BCryptFinishHash(
+                hash_,
+                digest.data(),
+                static_cast<ULONG>(digest.size()),
+                0U
+            ) != 0
+        ) {
+            return std::nullopt;
+        }
+        constexpr char digits[] = "0123456789abcdef";
+        std::string result;
+        result.reserve(digest.size() * 2U);
+        for (const UCHAR byte : digest) {
+            result.push_back(digits[byte >> 4U]);
+            result.push_back(digits[byte & 0x0FU]);
+        }
+        ready_ = false;
+        return result;
+    }
+
+private:
+    BCRYPT_ALG_HANDLE algorithm_ = nullptr;
+    BCRYPT_HASH_HANDLE hash_ = nullptr;
+    std::vector<UCHAR> object_;
+    bool ready_ = false;
+};
+
+std::optional<int> run_command_line_self_test() {
+    int argument_count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(
+        GetCommandLineW(),
+        &argument_count
+    );
+    if (arguments == nullptr) {
+        return 70;
+    }
+    if (
+        argument_count < 2
+        || std::wstring_view(arguments[1]) != L"--self-test"
+    ) {
+        LocalFree(arguments);
+        return std::nullopt;
+    }
+    if (
+        argument_count != 5
+        || std::wstring_view(arguments[3]) != L"--report"
+    ) {
+        LocalFree(arguments);
+        return 64;
+    }
+    const std::filesystem::path input(arguments[2]);
+    const std::filesystem::path report(arguments[4]);
+    LocalFree(arguments);
+
+    orkela::decoded_audio audio{};
+    std::wstring wide_error;
+    if (!orkela::decode_resonith_file(input, &audio, &wide_error)) {
+        return 65;
+    }
+    std::string error;
+    auto decoder = orkela::resonith_pull_decoder::open(
+        *audio.source_bytes,
+        &error
+    );
+    if (decoder == nullptr) {
+        return 66;
+    }
+    const orkela::resonith_stream_info info = decoder->info();
+    std::vector<std::int16_t> packet(info.maximum_packet_elements);
+    std::uint64_t frames = 0U;
+    std::uint64_t pcm_hash = 1469598103934665603ULL;
+    sha256_accumulator pcm_sha256;
+    while (true) {
+        std::uint32_t logical_start = 0U;
+        std::size_t frames_written = 0U;
+        const orkela::pull_result result = decoder->read_next(
+            packet,
+            &logical_start,
+            &frames_written,
+            &error
+        );
+        if (result == orkela::pull_result::end) {
+            break;
+        }
+        if (
+            result != orkela::pull_result::data
+            || logical_start != frames
+        ) {
+            return 67;
+        }
+        const std::size_t elements =
+            frames_written * static_cast<std::size_t>(info.channels);
+        pcm_hash = update_pcm_hash(
+            pcm_hash,
+            std::span<const std::int16_t>(packet.data(), elements)
+        );
+        if (!pcm_sha256.update(
+            std::span<const std::int16_t>(packet.data(), elements)
+        )) {
+            return 71;
+        }
+        frames += frames_written;
+    }
+    if (frames != info.frame_count) {
+        return 68;
+    }
+
+    const auto pcm_sha256_value = pcm_sha256.finish();
+    if (!pcm_sha256_value) {
+        return 71;
+    }
+    std::ofstream output(report, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        return 69;
+    }
+    output
+        << "{\n"
+        << "  \"channels\": " << info.channels << ",\n"
+        << "  \"frames\": " << frames << ",\n"
+        << "  \"pcm_fnv64\": \"" << pcm_hash << "\",\n"
+        << "  \"pcm_sha256\": \"" << *pcm_sha256_value << "\",\n"
+        << "  \"sample_rate\": " << info.sample_rate << ",\n"
+        << "  \"schema\": \"org.scenelith.orkela.self-test.v1\",\n"
+        << "  \"status\": \"pass\"\n"
+        << "}\n";
+    output.flush();
+    return output ? 0 : 69;
+}
 
 enum class command_page : std::size_t {
     overview,
@@ -3652,6 +3867,9 @@ int WINAPI wWinMain(
     PWSTR,
     int show_command
 ) {
+    if (const auto self_test = run_command_line_self_test()) {
+        return *self_test;
+    }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
         return 1;

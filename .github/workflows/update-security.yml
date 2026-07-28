@@ -1,0 +1,53 @@
+name: Update Security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tuf:
+    name: TUF 1.0 repository and hostile-client gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select Python 3.12
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install hash-locked TUF reference implementation
+        run: |
+          python -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --only-binary=:all: \
+            -r tools/release/requirements-tuf-ci-linux-x64.txt
+
+      - name: Run authenticated-update hostile-client gates
+        run: |
+          python -m unittest -v \
+            tests.test_update_manifest \
+            tests.test_tuf_repository
+
+      - name: Compile release tooling
+        run: |
+          python -m py_compile \
+            tools/release/generate_update_manifest.py \
+            tools/release/tuf_repository.py

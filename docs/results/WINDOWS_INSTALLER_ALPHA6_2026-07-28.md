@@ -40,15 +40,15 @@ The reproducible bootstrap pins the SHA-256 and refuses to execute a mismatch.
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
-| `Orkela-Windows-x64-0.3.0-alpha.6-Setup.exe` | 1,187,202 | `dc069e09a6065a9dd8aa58a091f81ff5791e3d5c47609155d1dce8b3c0d52644` |
-| `Orkela-Windows-arm64-0.3.0-alpha.6-Setup.exe` | 1,073,250 | `7dd95cedcfccfcc0e1d200513dc5172e43800e0f5402b9086d759271e55f1989` |
+| `Orkela-Windows-x64-0.3.0-alpha.6-Setup.exe` | 1,190,739 | `6c077e2360a49b5040d5003a19e8a9a2375cc8dd59c10fc580fc830fbceed3c8` |
+| `Orkela-Windows-arm64-0.3.0-alpha.6-Setup.exe` | 1,078,768 | `fedf90afe585ce2e6151deaf61cb0b862be690ced74b0c5dfc1e097ebac58908` |
 
 The embedded native payloads retain the separately tested hashes:
 
 | Payload | Bytes | SHA-256 |
 |---|---:|---|
-| Windows x64 | 2,763,264 | `880314be56b2a6b2bc5918fca6c55f2c3cb2ea75e5090673f220aadca2952e4d` |
-| Windows ARM64 | 2,475,008 | `617b73d7e76c531200c031e4de8e8249d95882be058804388b26cf9c2fa2ee00` |
+| Windows x64 | 2,770,432 | `30cd5a9a3f266c9c83c9e86d4bb95eba99981ec6761d6280f48d1c51b04da842` |
+| Windows ARM64 | 2,481,664 | `d4aa3b198381ff556c918875b8adaea25218a668a411725a0a2dd43e2b2840cb` |
 
 Both payloads were configured from a fresh public FetchContent clone pinned to
 Resonith commit
@@ -66,9 +66,13 @@ without changing the default installation location. The gate verified:
 - registry architecture `x64`;
 - exact isolated `InstallLocation`;
 - the `Orkela.Resonith` ProgID;
+- installed bytes equal the tested build payload;
+- bounded complete decode of 352,800 frames with PCM FNV64
+  `12408445622142514315` and PCM SHA-256
+  `3cfcae4996a08976f42ec83744ea0130935ca53d83b37129c001581697618618`;
 - uninstaller exit code `0`;
-- removal of the executable, product key, uninstall key, ProgID, association
-  value, and installation directory.
+- removal of the installation directory, product key, uninstall key, ProgID,
+  association value, and Start-menu directory.
 
 ARM64 cannot be executed on the x64 reference host. Its native executable
 passed the strict ARM64 cross-build; the same installer script is exercised in

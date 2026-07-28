@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -41,23 +42,26 @@ def parse_artifact(value: str) -> Artifact:
     return Artifact(candidate, platform, architecture, kind)
 
 
-def sha256(path: Path) -> str:
+def measure(path: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
+    length = 0
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            length += len(chunk)
             digest.update(chunk)
-    return digest.hexdigest()
+    return length, digest.hexdigest()
 
 
 def artifact_record(artifact: Artifact, base_url: str) -> dict[str, object]:
     filename = artifact.path.name
+    length, digest = measure(artifact.path)
     return {
         "arch": artifact.architecture,
-        "bytes": artifact.path.stat().st_size,
+        "bytes": length,
         "kind": artifact.kind,
         "name": filename,
         "platform": artifact.platform,
-        "sha256": sha256(artifact.path),
+        "sha256": digest,
         "url": f"{base_url.rstrip('/')}/{quote(filename)}",
     }
 
@@ -71,6 +75,10 @@ def build_manifest(
     base_url: str,
     artifacts: list[Artifact],
 ) -> dict[str, object]:
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("commit must be a lowercase full SHA-1 object ID")
+    if not base_url.startswith("https://"):
+        raise ValueError("release base URL must use HTTPS")
     filenames = [artifact.path.name for artifact in artifacts]
     if len(filenames) != len(set(filenames)):
         raise ValueError(

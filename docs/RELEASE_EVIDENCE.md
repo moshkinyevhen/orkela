@@ -48,10 +48,13 @@ The report records input filenames, complete sizes, and SHA-256 hashes.
     mapper/RegionSampling crash signature, and produce four dimensioned,
     visually non-uniform PNGs whose complete chunk chains and CRCs validate
     before the application gate begins.
-12. Build the Windows x64 and ARM64 installers from the matching native
-    payloads. On x64, install silently into an isolated current-user location,
-    verify version/architecture/uninstall/ProgID state, uninstall, and require
-    that the transaction leaves neither files nor Orkela registry keys.
+12. Build each Windows installer on its native x64 or ARM64 runner. Install
+    silently into an isolated current-user location, parse the installed PE
+    machine field, compare the installed executable hash with the tested build,
+    run the installed bounded full-decode self-test on a real Resonith input,
+    record its PCM fingerprint, verify version/architecture/uninstall/ProgID
+    state, uninstall, and require that the transaction leaves neither files,
+    shortcuts, associations, nor Orkela registry keys.
 13. On Ubuntu and Debian, build and inspect a native `.deb`, install it, launch
     the installed binary under a virtual display, remove it, and verify the
     executable is gone. Perform the corresponding native `.pkg` transaction on
@@ -60,6 +63,18 @@ The report records input filenames, complete sizes, and SHA-256 hashes.
     for CI execution, build a `productbuild` installer, and inspect the package
     payload. Developer ID signing and notarization remain mandatory before
     public promotion.
+15. Validate TUF root/targets signature thresholds, expiry, snapshot binding,
+    persisted rollback/equivocation ledger, transactional state, root
+    rotation, and exact target hashes. Re-run hostile-client cases for signed
+    rollback, expired metadata, mixed metadata generations, missing threshold
+    keys, wrong platform/architecture, development roots, target corruption,
+    and interrupted verification.
+16. Renew online snapshot/timestamp metadata multiple times without changing
+    application targets, then publish the next application sequence and prove
+    that an existing client accepts strictly increasing metadata versions.
+    Reject expired targets, signed-history forks, trust-profile laundering,
+    signer/repository path overlap, and any refresh failure that changes
+    trusted client state.
 
 ## Publication and versioning
 
