@@ -9,12 +9,16 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 namespace {
 
-bool exercise(const std::filesystem::path& path) {
+bool exercise(
+    const std::filesystem::path& path,
+    bool allow_headless
+) {
     const auto load_begin = std::chrono::steady_clock::now();
     auto audio = std::make_shared<orkela::decoded_audio>();
     std::wstring error;
@@ -24,6 +28,28 @@ bool exercise(const std::filesystem::path& path) {
         return false;
     }
     const auto load_end = std::chrono::steady_clock::now();
+
+    const UINT output_device_count = waveOutGetNumDevs();
+    if (allow_headless && output_device_count == 0U) {
+        std::int32_t preview_peak = 0;
+        for (const std::int16_t sample : audio->samples) {
+            preview_peak = std::max(
+                preview_peak,
+                std::abs(static_cast<std::int32_t>(sample))
+            );
+        }
+        if (audio->samples.empty() || preview_peak == 0) {
+            std::wcerr << path.filename().wstring()
+                       << L": headless preview is empty or silent\n";
+            return false;
+        }
+        std::wcout << path.filename().wstring()
+                   << L" hardware_playback=skipped"
+                   << L" reason=no_waveout_device"
+                   << L" preview_elements=" << audio->samples.size()
+                   << L" preview_peak=" << preview_peak << L'\n';
+        return true;
+    }
 
     orkela::wave_player player;
     player.play(audio, 0U, [](std::wstring) {});
@@ -122,12 +148,26 @@ bool exercise(const std::filesystem::path& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "usage: orkela_windows_playback_gate <stream> [stream...]\n";
+    bool allow_headless = false;
+    int first_path = 1;
+    if (
+        argc >= 2
+        && std::string_view(argv[1]) == "--allow-headless"
+    ) {
+        allow_headless = true;
+        first_path = 2;
+    }
+    if (argc <= first_path) {
+        std::cerr
+            << "usage: orkela_windows_playback_gate "
+            << "[--allow-headless] <stream> [stream...]\n";
         return 2;
     }
-    for (int index = 1; index < argc; ++index) {
-        if (!exercise(std::filesystem::path(argv[index]))) {
+    for (int index = first_path; index < argc; ++index) {
+        if (!exercise(
+                std::filesystem::path(argv[index]),
+                allow_headless
+            )) {
             return 1;
         }
     }

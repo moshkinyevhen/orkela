@@ -80,6 +80,18 @@ class PackagingContractTest(unittest.TestCase):
         self.assertNotIn("video/x-scenelith", mime_line.lower())
         self.assertNotIn("application/x-orka", mime_line.lower())
 
+    def test_nsis_bootstrap_is_pinned_and_uses_binary_route(self) -> None:
+        bootstrap = (
+            ROOT / "tools/release/bootstrap_nsis.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "3bc2b06253a7e4957111be152ac6a536e0c7478a706e19da814038db5d706495",
+            bootstrap,
+        )
+        self.assertIn("downloads.sourceforge.net/project/nsis/", bootstrap)
+        self.assertNotIn("nsis-$version-setup.exe/download", bootstrap)
+        self.assertIn("--retry-all-errors", bootstrap)
+
 
 if __name__ == "__main__":
     unittest.main()

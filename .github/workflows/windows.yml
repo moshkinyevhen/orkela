@@ -67,7 +67,7 @@ jobs:
             exit $status
           }
 
-      - name: Run x64 portable and playback gates
+      - name: Run x64 portable and available-device playback gates
         if: matrix.run_tests
         shell: pwsh
         run: |
@@ -76,6 +76,7 @@ jobs:
             -C Release `
             --output-on-failure
           & "build/${{ matrix.arch }}/Release/orkela_windows_playback_gate.exe" `
+            --allow-headless `
             "samples/emotional-piano.resonith"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
