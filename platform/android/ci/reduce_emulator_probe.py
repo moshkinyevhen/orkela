@@ -249,6 +249,15 @@ def validate_startup_evidence_file(
         f"{cell_id}: startup evidence count mismatch",
     )
     count_patterns = {
+        "feature_override_request_count": (
+            r"parseAndApplyOverrides, overrides='[^']*'"
+        ),
+        "guest_angle_disabled_override_count": (
+            r"Feature 'GuestAngle'.*overridden to 'disabled'"
+        ),
+        "guest_angle_auto_enabled_count": (
+            r"Auto-enabled GuestAngle feature for VulkanNativeSwapchain"
+        ),
         "vulkan_initialization_count": (
             r"Initializing VkEmulation features"
         ),
@@ -269,6 +278,9 @@ def validate_startup_evidence_file(
         ),
         "guest_vulkan_only_state_count": (
             r"gfxstreamFeature:GuestVulkanOnly\s*=\s*[01]"
+        ),
+        "surfaceflinger_angle_vk_instance_created_count": (
+            r"Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'"
         ),
         "compositor_vk_count": (
             r"Performing composition using CompositorVk"
@@ -407,6 +419,12 @@ def validate_result(
         host_feature["requested_vulkan"] == expected_vulkan_state,
         f"{cell_id}: requested Vulkan state mismatch",
     )
+    if "guest_vulkan_only" in expected:
+        require(
+            host_feature["requested_guest_vulkan_only"]
+            == expected["guest_vulkan_only"],
+            f"{cell_id}: requested GuestVulkanOnly state mismatch",
+        )
     require(
         host_feature["effective_vulkan_state_count"] == 1,
         f"{cell_id}: Vulkan state is not singular",
@@ -444,6 +462,10 @@ def validate_result(
     require(host["runner_os"] == "Linux", f"{cell_id}: runner OS mismatch")
     require(host["runner_arch"] == "X64", f"{cell_id}: runner arch mismatch")
     require(
+        host["runner_name"] not in {"", "missing"},
+        f"{cell_id}: runner name is missing",
+    )
+    require(
         host["image_os"] not in {"", "missing"},
         f"{cell_id}: runner image OS is missing",
     )
@@ -471,16 +493,151 @@ def validate_result(
         host["machine"] == "x86_64",
         f"{cell_id}: host machine mismatch",
     )
+    require(
+        re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}",
+            host["boot_id"],
+        )
+        is not None,
+        f"{cell_id}: host boot ID is invalid",
+    )
+    require(
+        re.fullmatch(r"[0-9a-f]{64}", host["evidence_sha256"])
+        is not None,
+        f"{cell_id}: host evidence hash is invalid",
+    )
     require(host["kvm_access"], f"{cell_id}: KVM access is missing")
+    probe_instance = result["probe_instance"]
+    require(
+        probe_instance["avd_name"] == f"orkela-renderer-probe-{cell_id}",
+        f"{cell_id}: AVD identity mismatch",
+    )
+    require(
+        probe_instance["android_avd_home"]
+        == f"{probe_instance['android_user_home']}/avd",
+        f"{cell_id}: AVD home is not scoped to the probe user home",
+    )
     process = result["process"]
     startup = result["startup"]
+    guest_evidence = startup["guest_evidence"]
+    require(
+        isinstance(result["adb_reached"], bool),
+        f"{cell_id}: ADB reachability is invalid",
+    )
     require(process["started"], f"{cell_id}: emulator process was not started")
     require(
         re.fullmatch(r"[0-9a-f]{64}", startup["evidence_sha256"])
         is not None,
         f"{cell_id}: invalid startup evidence hash",
     )
+    require(
+        isinstance(guest_evidence["boot_completed_property"], str),
+        f"{cell_id}: boot-completed property is invalid",
+    )
+    require(
+        result["boot_completed"]
+        == (guest_evidence["boot_completed_property"] == "1"),
+        f"{cell_id}: boot result contradicts captured guest property",
+    )
+    for field in ("boot_hardware_egl", "hardware_egl"):
+        require(
+            isinstance(guest_evidence[field], str),
+            f"{cell_id}: guest EGL property is invalid: {field}",
+        )
     if not result["boot_completed"]:
+        if result["adb_reached"]:
+            require(
+                expected.get("allow_guest_boot_rejection", False),
+                f"{cell_id}: ADB-reached guest boot rejection is not allowed",
+            )
+            require(
+                not result["environment_exact"],
+                f"{cell_id}: rejected guest boot cannot be exact",
+            )
+            require(not result["stable"], f"{cell_id}: rejected guest is stable")
+            require(
+                not result["stage1_candidate"],
+                f"{cell_id}: rejected guest is promotion eligible",
+            )
+            require(
+                guest["observed_fingerprint"] == GUEST_FINGERPRINT,
+                f"{cell_id}: rejected guest fingerprint mismatch",
+            )
+            require(
+                guest["selinux"] == ""
+                and guest["luma_sampling"] == ""
+                and guest["page_size"] == 0
+                and guest["display_width"] == 0
+                and guest["display_height"] == 0,
+                f"{cell_id}: rejected guest has post-boot conformance",
+            )
+            require(
+                startup["failure_class"]
+                == "guest-surfaceflinger-vulkan-coherent-memory-abort-loop",
+                f"{cell_id}: guest boot failure class is not allowlisted",
+            )
+            require(
+                guest_evidence["captured"],
+                f"{cell_id}: guest startup evidence was not captured",
+            )
+            for field in (
+                "logcat_sha256",
+                "getprop_sha256",
+                "analysis_sha256",
+            ):
+                require(
+                    re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        guest_evidence[field],
+                    )
+                    is not None,
+                    f"{cell_id}: invalid guest evidence hash: {field}",
+                )
+            require(
+                guest_evidence[
+                    "coherent_memory_angle_abort_tombstones"
+                ]
+                >= 2
+                and guest_evidence["surfaceflinger_abort_tombstones"] >= 2,
+                f"{cell_id}: repeated guest crash evidence is incomplete",
+            )
+            require(
+                guest_evidence["updatable_crashing"] == "1"
+                and guest_evidence[
+                    "updatable_crashing_process_name"
+                ]
+                == "surfaceflinger",
+                f"{cell_id}: updatable crash property is not causal",
+            )
+            require(
+                process["alive_after_probe"] and process["exit_code"] is None,
+                f"{cell_id}: ADB-reached rejected process is not alive",
+            )
+            require(
+                set(result["failures"])
+                == {
+                    "boot-completion-timeout",
+                    (
+                        "guest-surfaceflinger-vulkan-coherent-memory-"
+                        "abort-loop"
+                    ),
+                },
+                f"{cell_id}: guest boot failure list is not exact",
+            )
+            require(
+                result["soak"]["requested_seconds"]
+                == (0 if expected_probe_scope == "startup" else 120)
+                and result["soak"]["observations"] == 0
+                and result["soak"]["healthy_observations"] == 0
+                and result["soak"]["valid_screenshots"] == 0,
+                f"{cell_id}: rejected guest contains runtime evidence",
+            )
+            require(
+                startup["host_compositor_error_count"] == 0,
+                f"{cell_id}: guest rejection overlaps a host compositor error",
+            )
+            return "provenance-valid-adb-reached-guest-boot-rejection"
         require(
             expected.get("allow_unsupported_feature", False),
             f"{cell_id}: pre-boot rejection is not allowed for this cell",
@@ -575,6 +732,7 @@ def validate_result(
             f"{cell_id}: pre-boot crash evidence is contradictory",
         )
         return "provenance-valid-preboot-rejection"
+    require(result["adb_reached"], f"{cell_id}: boot completed without ADB")
     require(
         guest["observed_fingerprint"] == GUEST_FINGERPRINT,
         f"{cell_id}: observed fingerprint mismatch",

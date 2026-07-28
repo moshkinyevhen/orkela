@@ -23,20 +23,36 @@ case "$feature_profile" in
   default)
     requested_vulkan=0
     requested_vulkan_native_swapchain=0
+    requested_feature_overrides=""
     ;;
   vulkan-native-swapchain)
     requested_vulkan=0
     requested_vulkan_native_swapchain=1
+    requested_feature_overrides="VulkanNativeSwapchain"
     ;;
   vulkan-native-swapchain-with-vulkan)
     requested_vulkan=1
     requested_vulkan_native_swapchain=1
+    requested_guest_vulkan_only=1
+    requested_feature_overrides="Vulkan,VulkanNativeSwapchain"
+    ;;
+  vulkan-native-swapchain-with-vulkan-guest-angle-off)
+    requested_vulkan=1
+    requested_vulkan_native_swapchain=1
+    requested_guest_vulkan_only=0
+    requested_feature_overrides="Vulkan,VulkanNativeSwapchain,-GuestAngle"
     ;;
   *)
     echo "Unsupported Emulator feature profile: $feature_profile" >&2
     exit 2
     ;;
 esac
+if [[ "$feature_profile" != \
+    "vulkan-native-swapchain-with-vulkan" \
+    && "$feature_profile" != \
+      "vulkan-native-swapchain-with-vulkan-guest-angle-off" ]]; then
+  requested_guest_vulkan_only=-1
+fi
 probe_scope="${4:-soak}"
 case "$probe_scope" in
   soak|startup) ;;
@@ -66,8 +82,8 @@ device_serial="emulator-$emulator_console_port"
 avd_name="orkela-renderer-probe-$cell_id"
 evidence_root="${ORKELA_RENDERER_PROBE_ROOT:-build/android37-renderer-probe}"
 evidence="$evidence_root/$cell_id"
-export ANDROID_USER_HOME="${ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-renderer-probe-$cell_id}"
-export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
+export ANDROID_USER_HOME="${ORKELA_ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-renderer-probe-$cell_id}"
+export ANDROID_AVD_HOME="${ORKELA_ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 emulator_pid=""
@@ -75,7 +91,9 @@ failure_file="$evidence/failures.txt"
 observations_file="$evidence/observations.csv"
 screenshots_json="$evidence/SCREENSHOTS.json"
 result_json="$evidence/PROBE-RESULT.json"
+guest_analysis_json="$evidence/GUEST-STARTUP-ANALYSIS.json"
 boot_completed=false
+adb_reached=false
 environment_exact=false
 stable=false
 observations=0
@@ -109,6 +127,21 @@ vulkan_native_swapchain_enabled_count=0
 vulkan_native_swapchain_state_count=0
 guest_vulkan_only_enabled_count=0
 guest_vulkan_only_state_count=0
+surfaceflinger_angle_vk_instance_created_count=0
+guest_logcat_sha256=""
+guest_getprop_sha256=""
+guest_analysis_sha256=""
+guest_surfaceflinger_tombstones=0
+guest_coherent_memory_angle_abort_tombstones=0
+guest_updatable_crashing=""
+guest_updatable_crashing_process_name=""
+guest_boot_completed_property=""
+guest_boot_hardware_egl=""
+guest_hardware_egl=""
+guest_evidence_captured=false
+feature_override_request_count=0
+guest_angle_disabled_override_count=0
+guest_angle_auto_enabled_count=0
 compositor_vk_count=0
 host_compositor_error_count=0
 known_failing_tuple=false
@@ -120,10 +153,12 @@ crash_evidence_complete=false
 pre_soak_log_ok=false
 post_soak_log_ok=false
 luma_query_ok=false
+diagnostics_captured=false
 display_width=0
 display_height=0
 runner_os="${RUNNER_OS:-missing}"
 runner_arch="${RUNNER_ARCH:-missing}"
+runner_name="${RUNNER_NAME:-missing}"
 image_os="${ImageOS:-missing}"
 image_version="${ImageVersion:-missing}"
 github_run_id="${GITHUB_RUN_ID:-missing}"
@@ -131,6 +166,10 @@ github_run_attempt="${GITHUB_RUN_ATTEMPT:-missing}"
 github_sha="${GITHUB_SHA:-missing}"
 host_kernel_release="$(uname -r)"
 host_machine="$(uname -m)"
+host_boot_id="$(
+  tr -d '\r\n' < /proc/sys/kernel/random/boot_id 2>/dev/null \
+    || echo missing
+)"
 kvm_access=false
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
   kvm_access=true
@@ -141,6 +180,7 @@ mkdir -p "$evidence/logs" "$evidence/screenshots" "$ANDROID_AVD_HOME"
 {
   echo "runner_os=$runner_os"
   echo "runner_arch=$runner_arch"
+  echo "runner_name=$runner_name"
   echo "image_os=$image_os"
   echo "image_version=$image_version"
   echo "github_run_id=$github_run_id"
@@ -148,8 +188,12 @@ mkdir -p "$evidence/logs" "$evidence/screenshots" "$ANDROID_AVD_HOME"
   echo "github_sha=$github_sha"
   echo "kernel_release=$host_kernel_release"
   echo "machine=$host_machine"
+  echo "boot_id=$host_boot_id"
   echo "kvm_access=$kvm_access"
 } > "$evidence/HOST-IDENTITY.txt"
+host_identity_sha256="$(
+  sha256sum "$evidence/HOST-IDENTITY.txt" | awk '{print $1}'
+)"
 printf '%s\n' \
   "utc,index,elapsed_seconds,healthy,surfaceflinger_pid,package,surfaceflinger,mount,storage" \
   > "$observations_file"
@@ -171,11 +215,14 @@ capture_optional_diagnostics() {
   timeout --signal=TERM --kill-after=3s 15s \
     adb -s "$device_serial" logcat -b all -d -v threadtime \
     > "$evidence/logs/logcat-all.txt" 2>&1 || true
+  diagnostics_captured=true
 }
 
 cleanup() {
   set +e
-  capture_optional_diagnostics
+  if [[ "$diagnostics_captured" != "true" ]]; then
+    capture_optional_diagnostics
+  fi
   timeout --signal=TERM --kill-after=5s 15s \
     adb -s "$device_serial" emu kill >/dev/null 2>&1
   if [[ -n "$emulator_pid" ]]; then
@@ -235,6 +282,12 @@ if [[ "$feature_profile" == "vulkan-native-swapchain" ]]; then
 elif [[ "$feature_profile" == \
     "vulkan-native-swapchain-with-vulkan" ]]; then
   emulator_args+=(-feature Vulkan,VulkanNativeSwapchain)
+elif [[ "$feature_profile" == \
+    "vulkan-native-swapchain-with-vulkan-guest-angle-off" ]]; then
+  emulator_args+=(
+    -feature
+    Vulkan,VulkanNativeSwapchain,-GuestAngle
+  )
 fi
 printf '%q ' "$emulator_bin" "${emulator_args[@]}" \
   > "$evidence/EMULATOR-COMMAND.txt"
@@ -255,6 +308,7 @@ while ((SECONDS < device_deadline)); do
        END { exit !found }' \
       "$evidence/logs/adb-devices.txt"; then
     device_seen=true
+    adb_reached=true
     break
   fi
   if ! kill -0 "$emulator_pid" 2>/dev/null; then
@@ -285,6 +339,10 @@ else
     fi
     sleep 2
   done
+  if [[ "$boot_completed" != "true" ]] \
+      && kill -0 "$emulator_pid" 2>/dev/null; then
+    record_failure "boot-completion-timeout"
+  fi
 fi
 
 if [[ "$boot_completed" == "true" ]]; then
@@ -581,6 +639,71 @@ if [[ "$boot_completed" == "true" ]]; then
   fi
 fi
 
+if [[ "$adb_reached" == "true" ]]; then
+  # Capture the raw guest state before classification. Cleanup must not
+  # overwrite these files after their hashes have entered PROBE-RESULT.json.
+  capture_optional_diagnostics
+  if python3 platform/android/ci/analyze_guest_boot_evidence.py \
+      "$evidence/logs/logcat-all.txt" \
+      "$evidence/logs/getprop.txt" \
+      "$guest_analysis_json"; then
+    guest_evidence_captured=true
+    guest_logcat_sha256="$(
+      sha256sum "$evidence/logs/logcat-all.txt" | awk '{print $1}'
+    )"
+    guest_getprop_sha256="$(
+      sha256sum "$evidence/logs/getprop.txt" | awk '{print $1}'
+    )"
+    guest_analysis_sha256="$(
+      sha256sum "$guest_analysis_json" | awk '{print $1}'
+    )"
+    guest_surfaceflinger_tombstones="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["surfaceflinger_abort_tombstones"])' \
+        "$guest_analysis_json"
+    )"
+    guest_coherent_memory_angle_abort_tombstones="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["coherent_memory_angle_abort_tombstones"])' \
+        "$guest_analysis_json"
+    )"
+    guest_updatable_crashing="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["updatable_crashing_property"])' \
+        "$guest_analysis_json"
+    )"
+    guest_updatable_crashing_process_name="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["updatable_crashing_process_name"])' \
+        "$guest_analysis_json"
+    )"
+    guest_boot_completed_property="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["boot_completed_property"])' \
+        "$guest_analysis_json"
+    )"
+    guest_boot_hardware_egl="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["boot_hardware_egl"])' \
+        "$guest_analysis_json"
+    )"
+    guest_hardware_egl="$(
+      python3 -c \
+        'import json,sys; print(json.load(open(sys.argv[1]))["hardware_egl"])' \
+        "$guest_analysis_json"
+    )"
+    if [[ -z "$observed_fingerprint" ]]; then
+      observed_fingerprint="$(
+        python3 -c \
+          'import json,sys; print(json.load(open(sys.argv[1]))["observed_fingerprint"])' \
+          "$guest_analysis_json"
+      )"
+    fi
+  else
+    record_failure "guest-startup-evidence-analysis"
+  fi
+fi
+
 grep -E \
   'Graphics Adapter|GPU mode|Vulkan|GLDirectMem|GlDma|HasSharedSlots|Renderer|renderer' \
   "$evidence/logs/emulator.log" \
@@ -644,7 +767,7 @@ fi
 # normalized host failure signature are present.
 startup_evidence_file="$evidence/STARTUP-FAILURE-EVIDENCE.txt"
 grep -E \
-  'gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GuestVulkanOnly)[[:space:]]*=|Initializing VkEmulation features|useVulkanComposition:[[:space:]]*(true|false)|useVulkanNativeSwapchain:[[:space:]]*(true|false)|Performing composition using CompositorVk|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer' \
+  "parseAndApplyOverrides, overrides=|Feature 'GuestAngle'.*overridden to '(enabled|disabled)'|Auto-enabled GuestAngle feature for VulkanNativeSwapchain|gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GuestVulkanOnly)[[:space:]]*=|Initializing VkEmulation features|useVulkanComposition:[[:space:]]*(true|false)|useVulkanNativeSwapchain:[[:space:]]*(true|false)|Performing composition using CompositorVk|Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer" \
   "$evidence/logs/emulator.log" \
   | sed -E 's/^[^|]*\|[[:space:]]*//' \
   > "$startup_evidence_file" || true
@@ -653,6 +776,21 @@ startup_evidence_count="$(
 )"
 startup_evidence_sha256="$(
   sha256sum "$startup_evidence_file" | awk '{print $1}'
+)"
+feature_override_request_count="$(
+  grep -Fxc \
+    "parseAndApplyOverrides, overrides='$requested_feature_overrides'" \
+    "$startup_evidence_file" || true
+)"
+guest_angle_disabled_override_count="$(
+  grep -Ec \
+    "Feature 'GuestAngle'.*overridden to 'disabled'" \
+    "$startup_evidence_file" || true
+)"
+guest_angle_auto_enabled_count="$(
+  grep -Fc \
+    "Auto-enabled GuestAngle feature for VulkanNativeSwapchain" \
+    "$startup_evidence_file" || true
 )"
 vulkan_initialization_count="$(
   grep -Fc 'Initializing VkEmulation features' \
@@ -684,6 +822,11 @@ guest_vulkan_only_state_count="$(
     'gfxstreamFeature:GuestVulkanOnly[[:space:]]*=[[:space:]]*[01]' \
     "$startup_evidence_file" || true
 )"
+surfaceflinger_angle_vk_instance_created_count="$(
+  grep -Ec \
+    "Created VkInstance:.*application:'surfaceflinger'.*engine:'ANGLE'" \
+    "$startup_evidence_file" || true
+)"
 compositor_vk_count="$(
   grep -Fc 'Performing composition using CompositorVk' \
     "$startup_evidence_file" || true
@@ -696,10 +839,21 @@ host_compositor_error_count="$(
 if [[ "$host_compositor_error_count" -ge 3 \
     && "$boot_completed" == "false" ]]; then
   startup_failure_class="host-compositor-init-error"
+elif [[ "$adb_reached" == "true" \
+    && "$boot_completed" == "false" \
+    && "$guest_evidence_captured" == "true" \
+    && "$guest_coherent_memory_angle_abort_tombstones" -ge 2 \
+    && "$guest_updatable_crashing" == "1" \
+    && "$guest_updatable_crashing_process_name" == "surfaceflinger" ]]; then
+  startup_failure_class="guest-surfaceflinger-vulkan-coherent-memory-abort-loop"
+  record_failure \
+    "guest-surfaceflinger-vulkan-coherent-memory-abort-loop"
 elif grep -Fq "emulator-exited-before-adb" "$failure_file"; then
   startup_failure_class="emulator-exited-before-adb"
 elif grep -Fq "adb-device-timeout" "$failure_file"; then
   startup_failure_class="adb-device-timeout"
+elif grep -Fq "boot-completion-timeout" "$failure_file"; then
+  startup_failure_class="boot-completion-timeout"
 fi
 if kill -0 "$emulator_pid" 2>/dev/null; then
   process_alive_after_probe=true
@@ -771,8 +925,10 @@ RENDERER="$renderer" \
 PROBE_SCOPE="$probe_scope" \
 REQUESTED_SOAK_SECONDS="$requested_soak_seconds" \
 FEATURE_PROFILE="$feature_profile" \
+REQUESTED_FEATURE_OVERRIDES="$requested_feature_overrides" \
 REQUESTED_VULKAN="$requested_vulkan" \
 REQUESTED_VULKAN_NATIVE_SWAPCHAIN="$requested_vulkan_native_swapchain" \
+REQUESTED_GUEST_VULKAN_ONLY="$requested_guest_vulkan_only" \
 EFFECTIVE_VULKAN="$effective_vulkan" \
 EFFECTIVE_VULKAN_COUNT="$effective_vulkan_count" \
 EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN="$effective_vulkan_native_swapchain" \
@@ -791,10 +947,26 @@ VULKAN_NATIVE_SWAPCHAIN_ENABLED_COUNT="$vulkan_native_swapchain_enabled_count" \
 VULKAN_NATIVE_SWAPCHAIN_STATE_COUNT="$vulkan_native_swapchain_state_count" \
 GUEST_VULKAN_ONLY_ENABLED_COUNT="$guest_vulkan_only_enabled_count" \
 GUEST_VULKAN_ONLY_STATE_COUNT="$guest_vulkan_only_state_count" \
+SURFACEFLINGER_ANGLE_VK_INSTANCE_CREATED_COUNT="$surfaceflinger_angle_vk_instance_created_count" \
+GUEST_LOGCAT_SHA256="$guest_logcat_sha256" \
+GUEST_GETPROP_SHA256="$guest_getprop_sha256" \
+GUEST_ANALYSIS_SHA256="$guest_analysis_sha256" \
+GUEST_SURFACEFLINGER_TOMBSTONES="$guest_surfaceflinger_tombstones" \
+GUEST_COHERENT_MEMORY_ANGLE_ABORT_TOMBSTONES="$guest_coherent_memory_angle_abort_tombstones" \
+GUEST_UPDATABLE_CRASHING="$guest_updatable_crashing" \
+GUEST_UPDATABLE_CRASHING_PROCESS_NAME="$guest_updatable_crashing_process_name" \
+GUEST_BOOT_COMPLETED_PROPERTY="$guest_boot_completed_property" \
+GUEST_BOOT_HARDWARE_EGL="$guest_boot_hardware_egl" \
+GUEST_HARDWARE_EGL="$guest_hardware_egl" \
+GUEST_EVIDENCE_CAPTURED="$guest_evidence_captured" \
+FEATURE_OVERRIDE_REQUEST_COUNT="$feature_override_request_count" \
+GUEST_ANGLE_DISABLED_OVERRIDE_COUNT="$guest_angle_disabled_override_count" \
+GUEST_ANGLE_AUTO_ENABLED_COUNT="$guest_angle_auto_enabled_count" \
 COMPOSITOR_VK_COUNT="$compositor_vk_count" \
 HOST_COMPOSITOR_ERROR_COUNT="$host_compositor_error_count" \
 RUNNER_OS_VALUE="$runner_os" \
 RUNNER_ARCH_VALUE="$runner_arch" \
+RUNNER_NAME_VALUE="$runner_name" \
 IMAGE_OS_VALUE="$image_os" \
 IMAGE_VERSION_VALUE="$image_version" \
 GITHUB_RUN_ID_VALUE="$github_run_id" \
@@ -802,7 +974,12 @@ GITHUB_RUN_ATTEMPT_VALUE="$github_run_attempt" \
 GITHUB_SHA_VALUE="$github_sha" \
 HOST_KERNEL_RELEASE="$host_kernel_release" \
 HOST_MACHINE="$host_machine" \
+HOST_BOOT_ID="$host_boot_id" \
+HOST_IDENTITY_SHA256="$host_identity_sha256" \
 KVM_ACCESS="$kvm_access" \
+ANDROID_USER_HOME_VALUE="$ANDROID_USER_HOME" \
+ANDROID_AVD_HOME_VALUE="$ANDROID_AVD_HOME" \
+AVD_NAME_VALUE="$avd_name" \
 EXPECTED_EMULATOR_VERSION="$expected_emulator_version" \
 EMULATOR_VERSION="$emulator_version" \
 ARCHIVE_REVISION="$archive_revision" \
@@ -820,6 +997,7 @@ OBSERVED_SELINUX="$observed_selinux" \
 OBSERVED_LUMA="$observed_luma" \
 OBSERVED_PAGE_SIZE="$observed_page_size" \
 BOOT_COMPLETED="$boot_completed" \
+ADB_REACHED="$adb_reached" \
 ENVIRONMENT_EXACT="$environment_exact" \
 STABLE="$stable" \
 OBSERVATIONS="$observations" \
@@ -872,6 +1050,7 @@ print(json.dumps({
     "effective_renderer_count": int(os.environ["EFFECTIVE_RENDERER_COUNT"]),
     "host_feature": {
         "profile": os.environ["FEATURE_PROFILE"],
+        "requested_overrides": os.environ["REQUESTED_FEATURE_OVERRIDES"],
         "requested_vulkan": int(os.environ["REQUESTED_VULKAN"]),
         "effective_vulkan": int(
             os.environ["EFFECTIVE_VULKAN"] or -1
@@ -881,6 +1060,9 @@ print(json.dumps({
         ),
         "requested_vulkan_native_swapchain": int(
             os.environ["REQUESTED_VULKAN_NATIVE_SWAPCHAIN"]
+        ),
+        "requested_guest_vulkan_only": int(
+            os.environ["REQUESTED_GUEST_VULKAN_ONLY"]
         ),
         "effective_vulkan_native_swapchain": int(
             os.environ["EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN"] or -1
@@ -924,14 +1106,54 @@ print(json.dumps({
         "guest_vulkan_only_state_count": int(
             os.environ["GUEST_VULKAN_ONLY_STATE_COUNT"]
         ),
+        "feature_override_request_count": int(
+            os.environ["FEATURE_OVERRIDE_REQUEST_COUNT"]
+        ),
+        "guest_angle_disabled_override_count": int(
+            os.environ["GUEST_ANGLE_DISABLED_OVERRIDE_COUNT"]
+        ),
+        "guest_angle_auto_enabled_count": int(
+            os.environ["GUEST_ANGLE_AUTO_ENABLED_COUNT"]
+        ),
+        "surfaceflinger_angle_vk_instance_created_count": int(
+            os.environ["SURFACEFLINGER_ANGLE_VK_INSTANCE_CREATED_COUNT"]
+        ),
         "compositor_vk_count": int(os.environ["COMPOSITOR_VK_COUNT"]),
         "host_compositor_error_count": int(
             os.environ["HOST_COMPOSITOR_ERROR_COUNT"]
         ),
+        "guest_evidence": {
+            "captured": boolean("GUEST_EVIDENCE_CAPTURED"),
+            "logcat_sha256": os.environ["GUEST_LOGCAT_SHA256"],
+            "getprop_sha256": os.environ["GUEST_GETPROP_SHA256"],
+            "analysis_sha256": os.environ["GUEST_ANALYSIS_SHA256"],
+            "surfaceflinger_abort_tombstones": int(
+                os.environ["GUEST_SURFACEFLINGER_TOMBSTONES"]
+            ),
+            "coherent_memory_angle_abort_tombstones": int(
+                os.environ[
+                    "GUEST_COHERENT_MEMORY_ANGLE_ABORT_TOMBSTONES"
+                ]
+            ),
+            "updatable_crashing": os.environ[
+                "GUEST_UPDATABLE_CRASHING"
+            ],
+            "updatable_crashing_process_name": os.environ[
+                "GUEST_UPDATABLE_CRASHING_PROCESS_NAME"
+            ],
+            "boot_completed_property": os.environ[
+                "GUEST_BOOT_COMPLETED_PROPERTY"
+            ],
+            "boot_hardware_egl": os.environ[
+                "GUEST_BOOT_HARDWARE_EGL"
+            ],
+            "hardware_egl": os.environ["GUEST_HARDWARE_EGL"],
+        },
     },
     "host": {
         "runner_os": os.environ["RUNNER_OS_VALUE"],
         "runner_arch": os.environ["RUNNER_ARCH_VALUE"],
+        "runner_name": os.environ["RUNNER_NAME_VALUE"],
         "image_os": os.environ["IMAGE_OS_VALUE"],
         "image_version": os.environ["IMAGE_VERSION_VALUE"],
         "github_run_id": os.environ["GITHUB_RUN_ID_VALUE"],
@@ -939,7 +1161,14 @@ print(json.dumps({
         "github_sha": os.environ["GITHUB_SHA_VALUE"],
         "kernel_release": os.environ["HOST_KERNEL_RELEASE"],
         "machine": os.environ["HOST_MACHINE"],
+        "boot_id": os.environ["HOST_BOOT_ID"],
         "kvm_access": boolean("KVM_ACCESS"),
+        "evidence_sha256": os.environ["HOST_IDENTITY_SHA256"],
+    },
+    "probe_instance": {
+        "android_user_home": os.environ["ANDROID_USER_HOME_VALUE"],
+        "android_avd_home": os.environ["ANDROID_AVD_HOME_VALUE"],
+        "avd_name": os.environ["AVD_NAME_VALUE"],
     },
     "expected_control_failure": boolean("EXPECTED_CONTROL_FAILURE"),
     "known_control_crash_reproduced": boolean(
@@ -950,6 +1179,7 @@ print(json.dumps({
     "stage1_candidate": boolean("STAGE1_CANDIDATE"),
     "stable": boolean("STABLE"),
     "boot_completed": boolean("BOOT_COMPLETED"),
+    "adb_reached": boolean("ADB_REACHED"),
     "environment_exact": boolean("ENVIRONMENT_EXACT"),
     "emulator": {
         "expected": os.environ["EXPECTED_EMULATOR_VERSION"],

@@ -234,6 +234,91 @@ framebuffer error, or failure to reach ADB rejects this route. Xvfb becomes a
 causal follow-up only if Vulkan initialization succeeds and the remaining
 failure explicitly names an X11/XCB surface or display connection.
 
+### Completed explicit-backend run
+
+[GitHub run 30369153246](https://github.com/moshkinyevhen/orkela/actions/runs/30369153246)
+resolved the previously missing coordinate:
+
+- effective `Vulkan=1`, `VulkanNativeSwapchain=1`, and
+  `GuestVulkanOnly=1` were singular;
+- VkEmulation initialized, both Vulkan composition flags were true, and
+  `CompositorVk` performed composition;
+- no host framebuffer or compositor initialization error occurred;
+- the Emulator process remained alive and ADB reached `device` state;
+- `sys.boot_completed` did not become `1`.
+
+The failed boot was a guest failure, not a backend or ADB failure. Raw logcat
+contains 58 structurally valid SurfaceFlinger fatal-signal records. The
+bounded parser links 51 of them to complete same-debuggerd tombstone episodes;
+all 51 contain the causal stack through `libGLESv2_angle.so` and
+`vulkan.ranchu.so::ResourceTracker::createCoherentMemory`. It rejects
+truncated episodes instead of counting partial evidence. Raw getprop
+simultaneously reports `sys.init.updatable_crashing=1` and
+`sys.init.updatable_crashing_process_name=surfaceflinger`.
+
+The original producer wrote `failure_class=none` because it captured logcat
+only in its cleanup trap, after writing `PROBE-RESULT.json`, and treated
+`boot_completed` as a surrogate for ADB reachability. The corrected evidence
+schema records `adb_reached` independently, adds `boot-completion-timeout`,
+captures logcat and getprop before classification, SHA-256 links both raw
+files, and requires the assessor to recompute complete tombstone episodes.
+Replaying the immutable run evidence through that fail-closed assessor yields:
+
+```text
+BACKEND_REACHED_ADB_GUEST_BOOT_REJECTED
+```
+
+This status remains non-promotable. It preserves the proved host backend while
+rejecting the crashing guest route.
+
+### Causal GuestAngle A/B experiment
+
+The R-185 audit rejected `Vulkan=1, VulkanNativeSwapchain=0` as the next
+primary experiment. Gfxstream selects Vulkan composition when
+`GuestVulkanOnly || VulkanNativeSwapchain`; disabling both guest Vulkan-only
+mode and the native swapchain would also remove `CompositorVk`, confounding the
+experiment.
+
+The next exact pair therefore retains the completed tuple as its baseline and
+changes one coordinate in the candidate:
+
+```text
+-feature Vulkan,VulkanNativeSwapchain,-GuestAngle
+```
+
+Android Emulator 37.2.1 explicitly logged that
+`VulkanNativeSwapchain` auto-enabled `GuestAngle`. A command-line feature
+override is therefore the narrowest tested intervention. Baseline and
+candidate run sequentially in one GitHub job on the same VM, kernel boot ID,
+runner image, KVM device, source revision, Emulator archive, and Android guest.
+They use separate `ANDROID_USER_HOME`, AVD directories, and AVD names. A joint
+SHA-linked reducer rejects the causal claim if either host identity differs or
+if any configured coordinate other than GuestAngle differs.
+
+The candidate is accepted only if the Emulator log proves the exact
+`Vulkan,VulkanNativeSwapchain,-GuestAngle` override, one explicit
+`GuestAngle=disabled` marker, no auto-enable marker, and effective
+`Vulkan=1`, `VulkanNativeSwapchain=1`, `GuestVulkanOnly=0`. VkEmulation,
+`useVulkanComposition=true`, `useVulkanNativeSwapchain=true`, and
+`CompositorVk` must remain present. Raw getprop must independently show
+`sys.boot_completed=1`, no `ro.boot.hardwareegl` override, and effective
+`ro.hardware.egl=emulation`. A boot-completed candidate is still rejected if
+raw evidence contains any SurfaceFlinger abort tombstone or fatal signal, any
+target coherent-memory/ANGLE episode, any MESA virtual-memory fatal, or a
+final updatable-crashing SurfaceFlinger state. Any mixed feature state, changed
+host identity, missing marker, result/property contradiction, or a boot that
+recovers while still crashing is an evidence rejection, not a fallback.
+
+The evidence parser accepts only bounded `logcat -v threadtime` episodes. It
+requires the linked SurfaceFlinger `F libc` PID/TID, a single-debuggerd
+`F DEBUG` tombstone, and the complete target stack. Hashing and parsing use
+the same immutable read of each raw file, preventing a hash/parse TOCTOU.
+
+The source basis for this experiment is the
+[AEMU feature catalog](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android/data/advancedFeatures.ini),
+[AEMU OpenGLES feature mapping](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android/android-emu/android/opengles.cpp),
+and [Gfxstream FrameBuffer selection](https://android.googlesource.com/platform/hardware/google/gfxstream/+/refs/heads/main/host/FrameBuffer.cpp).
+
 This follows Android's documented renderer controls and emulator archive:
 
 - [Configure graphics acceleration](https://developer.android.com/studio/run/emulator-acceleration#command-gpu)

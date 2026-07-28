@@ -32,6 +32,19 @@ class EmulatorProbeReducerTest(unittest.TestCase):
         renderer = expected["renderer"]
         feature_profile = expected.get("feature_profile", "default")
         feature_state = expected.get("vulkan_native_swapchain", 0)
+        feature_overrides = expected.get(
+            "feature_overrides",
+            {
+                "default": "",
+                "vulkan-native-swapchain": "VulkanNativeSwapchain",
+                "vulkan-native-swapchain-with-vulkan": (
+                    "Vulkan,VulkanNativeSwapchain"
+                ),
+                "vulkan-native-swapchain-with-vulkan-guest-angle-off": (
+                    "Vulkan,VulkanNativeSwapchain,-GuestAngle"
+                ),
+            }[feature_profile],
+        )
         tuple_name = REDUCER.EXPECTED_RENDERER_LINES[renderer]
         if stable:
             failures = []
@@ -52,9 +65,14 @@ class EmulatorProbeReducerTest(unittest.TestCase):
             "effective_renderer_count": 1,
             "host_feature": {
                 "profile": feature_profile,
+                "requested_overrides": feature_overrides,
                 "requested_vulkan": expected.get("vulkan", 0),
                 "effective_vulkan": expected.get("vulkan", 0),
                 "effective_vulkan_state_count": 1,
+                "requested_guest_vulkan_only": expected.get(
+                    "guest_vulkan_only",
+                    -1,
+                ),
                 "requested_vulkan_native_swapchain": feature_state,
                 "effective_vulkan_native_swapchain": feature_state,
                 "effective_state_count": 1,
@@ -74,14 +92,32 @@ class EmulatorProbeReducerTest(unittest.TestCase):
                 "vulkan_composition_state_count": 0,
                 "vulkan_native_swapchain_enabled_count": 0,
                 "vulkan_native_swapchain_state_count": 0,
+                "feature_override_request_count": 0,
+                "guest_angle_disabled_override_count": 0,
+                "guest_angle_auto_enabled_count": 0,
                 "guest_vulkan_only_enabled_count": 0,
                 "guest_vulkan_only_state_count": 0,
+                "surfaceflinger_angle_vk_instance_created_count": 0,
                 "compositor_vk_count": 0,
                 "host_compositor_error_count": 0,
+                "guest_evidence": {
+                    "captured": True,
+                    "logcat_sha256": "b" * 64,
+                    "getprop_sha256": "c" * 64,
+                    "analysis_sha256": "d" * 64,
+                    "surfaceflinger_abort_tombstones": 0,
+                    "coherent_memory_angle_abort_tombstones": 0,
+                    "updatable_crashing": "",
+                    "updatable_crashing_process_name": "",
+                    "boot_completed_property": "1",
+                    "boot_hardware_egl": "",
+                    "hardware_egl": "emulation",
+                },
             },
             "host": {
                 "runner_os": "Linux",
                 "runner_arch": "X64",
+                "runner_name": "GitHub Actions 42",
                 "image_os": "ubuntu24",
                 "image_version": "20260720.1",
                 "github_run_id": "123456789",
@@ -89,7 +125,16 @@ class EmulatorProbeReducerTest(unittest.TestCase):
                 "github_sha": "a" * 40,
                 "kernel_release": "6.11.0-test",
                 "machine": "x86_64",
+                "boot_id": "12345678-1234-1234-1234-123456789abc",
                 "kvm_access": True,
+                "evidence_sha256": "e" * 64,
+            },
+            "probe_instance": {
+                "android_user_home": f"/tmp/orkela-renderer-probe-{cell_id}",
+                "android_avd_home": (
+                    f"/tmp/orkela-renderer-probe-{cell_id}/avd"
+                ),
+                "avd_name": f"orkela-renderer-probe-{cell_id}",
             },
             "expected_control_failure": is_control,
             "known_control_crash_reproduced": is_control,
@@ -98,6 +143,7 @@ class EmulatorProbeReducerTest(unittest.TestCase):
             "stage1_candidate": stable and not is_control,
             "stable": stable,
             "boot_completed": True,
+            "adb_reached": True,
             "environment_exact": True,
             "emulator": {
                 "expected": expected["binary_version"],
@@ -228,6 +274,10 @@ class EmulatorProbeReducerTest(unittest.TestCase):
             path = root / winner / "PROBE-RESULT.json"
             result = json.loads(path.read_text(encoding="utf-8"))
             result["boot_completed"] = False
+            result["adb_reached"] = False
+            result["startup"]["guest_evidence"][
+                "boot_completed_property"
+            ] = ""
             path.write_text(json.dumps(result), encoding="utf-8")
 
             with self.assertRaisesRegex(
@@ -246,6 +296,7 @@ class EmulatorProbeReducerTest(unittest.TestCase):
                 result = json.loads(path.read_text(encoding="utf-8"))
                 result.update({
                     "boot_completed": False,
+                    "adb_reached": False,
                     "environment_exact": False,
                     "stable": False,
                     "stage1_candidate": False,
@@ -278,6 +329,10 @@ class EmulatorProbeReducerTest(unittest.TestCase):
                     "evidence_count": 8,
                     "host_compositor_error_count": 3,
                 })
+                result["startup"]["guest_evidence"]["captured"] = False
+                result["startup"]["guest_evidence"][
+                    "boot_completed_property"
+                ] = ""
                 evidence = (
                     b"Failed to initialize the compositor.\n"
                     b"Failed to initialize FrameBuffer().\n"

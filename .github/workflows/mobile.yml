@@ -890,12 +890,12 @@ jobs:
           retention-days: 14
 
   android-vulkan-backend-probe:
-    name: Android 17 explicit Vulkan backend diagnostic
+    name: Android 17 Vulkan backend / same-host GuestAngle A/B
     if: >-
       github.event_name == 'workflow_dispatch'
       && inputs.vulkan_backend_probe == true
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 55
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -915,6 +915,7 @@ jobs:
           bash -n platform/android/ci/prepare_emulator_probe.sh
           bash -n platform/android/ci/probe_renderer.sh
           python3 -m py_compile \
+            platform/android/ci/analyze_guest_boot_evidence.py \
             platform/android/ci/reduce_emulator_probe.py \
             platform/android/ci/assess_vulkan_backend_probe.py
 
@@ -929,38 +930,49 @@ jobs:
             346539649 \
             37.2.1.0
 
-      - name: Probe explicit Vulkan composition backend
+      - name: Probe baseline then GuestAngle-off on the same runner
         shell: bash
         run: |
+          set -euo pipefail
           bash platform/android/ci/probe_renderer.sh \
             swiftshader \
             diagnostic-37_2_1-swiftshader-vulkan-vns \
             vulkan-native-swapchain-with-vulkan \
             startup
+          bash platform/android/ci/probe_renderer.sh \
+            swiftshader \
+            diagnostic-37_2_1-swiftshader-vulkan-vns-guest-angle-off \
+            vulkan-native-swapchain-with-vulkan-guest-angle-off \
+            startup
 
-      - name: Assess exact startup evidence
+      - name: Assess exact same-host intervention
         shell: bash
         run: |
           set -euo pipefail
           python3 platform/android/ci/assess_vulkan_backend_probe.py \
             build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns/PROBE-RESULT.json \
-            ANDROID17-VULKAN-BACKEND-ASSESSMENT.json
+            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns-guest-angle-off/PROBE-RESULT.json \
+            ANDROID17-VULKAN-BACKEND-JOINT-ASSESSMENT.json
 
       - name: Summarize exact backend result
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          assessment="ANDROID17-VULKAN-BACKEND-ASSESSMENT.json"
+          assessment="ANDROID17-VULKAN-BACKEND-JOINT-ASSESSMENT.json"
           if [[ -s "$assessment" ]]; then
             {
-              echo "## Android 17 explicit Vulkan backend diagnostic"
+              echo "## Android 17 same-host GuestAngle intervention"
               echo "- Status: $(jq -r .status "$assessment")"
-              echo "- Disposition: $(jq -r .disposition "$assessment")"
+              echo "- Same host identity: $(jq -r .same_host_identity "$assessment")"
+              echo "- Isolated probe instances: $(jq -r .isolated_probe_instances "$assessment")"
+              echo "- One coordinate exact: $(jq -r .one_coordinate_intervention_exact "$assessment")"
               echo "- Promotion eligible: $(jq -r .promotion_eligible "$assessment")"
-              echo "- Reached ADB: $(jq -r .backend_markers.adb_reached "$assessment")"
-              echo "- VkEmulation initialized: $(jq -r .backend_markers.vulkan_initialization "$assessment")"
-              echo "- CompositorVk selected: $(jq -r .backend_markers.compositor_vk_selected "$assessment")"
+              echo "- Baseline status: $(jq -r .baseline.status "$assessment")"
+              echo "- Candidate status: $(jq -r .candidate.status "$assessment")"
+              echo "- Baseline abort loop: $(jq -r .baseline.target_guest_abort_loop_recomputed "$assessment")"
+              echo "- Candidate boot completed: $(jq -r .candidate.backend_markers.boot_completed "$assessment")"
+              echo "- Candidate guest clean: $(jq -r .candidate.clean_guest_boot_recomputed "$assessment")"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No provenance-valid backend assessment was produced." \
@@ -971,10 +983,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Orkela-Android17-vulkan-backend-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Orkela-Android17-vulkan-backend-same-host-ab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns
-            ANDROID17-VULKAN-BACKEND-ASSESSMENT.json
+            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns-guest-angle-off
+            ANDROID17-VULKAN-BACKEND-JOINT-ASSESSMENT.json
           if-no-files-found: error
           retention-days: 14
 

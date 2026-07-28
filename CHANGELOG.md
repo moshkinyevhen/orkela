@@ -141,6 +141,26 @@ Local public-pin evidence:
   follow-up diagnostic explicitly enables both `Vulkan` and
   `VulkanNativeSwapchain` and requires VkEmulation, Vulkan composition,
   `CompositorVk`, and ADB evidence before the Linux route may continue.
+- The exact explicit-backend run proved that Emulator 37.2.1 initializes
+  SwiftShader VkEmulation and `CompositorVk` and reaches ADB, then fails guest
+  boot with 58 SurfaceFlinger fatal signals. A bounded same-PID/TID parser
+  links 51 complete tombstones through ANGLE and
+  `vulkan.ranchu::createCoherentMemory`, rejecting seven incomplete episodes.
+  Probe evidence now separates
+  `adb_reached` from `boot_completed`, records the boot deadline, SHA-256 links
+  raw logcat/getprop, parses the exact same immutable bytes it hashes, and
+  independently recomputes complete tombstones.
+- The next causal Android 17 gate now runs the failing explicit-backend
+  baseline followed by
+  `Vulkan,VulkanNativeSwapchain,-GuestAngle`. The candidate must prove
+  `GuestVulkanOnly=0` while preserving VkEmulation, Vulkan composition,
+  `CompositorVk`, and full guest boot; mixed or silently overridden feature
+  state fails closed. Both probes execute sequentially on one GitHub runner
+  and kernel boot ID with isolated AVD homes; one joint SHA-linked assessment
+  rejects any host drift or additional configured coordinate. Boot completion
+  is insufficient when raw evidence still contains a SurfaceFlinger abort,
+  target ANGLE/coherent-memory episode, MESA virtual-memory fatal, or final
+  updatable-crashing state.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.
