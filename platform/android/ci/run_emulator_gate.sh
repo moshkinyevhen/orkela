@@ -180,8 +180,12 @@ while ((SECONDS < services_deadline)); do
       | tr -d '\r' \
       || true
   )"
+  boot_animation_ready=0
+  if [[ -z "$boot_animation" || "$boot_animation" == "stopped" ]]; then
+    boot_animation_ready=1
+  fi
   if [[ "$package_service" == *"found"* \
-      && "$boot_animation" == "stopped" ]]; then
+      && "$boot_animation_ready" -eq 1 ]]; then
     stable_observations=$((stable_observations + 1))
     if [[ "$stable_observations" -ge 5 ]]; then
       break
