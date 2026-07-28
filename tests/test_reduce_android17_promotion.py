@@ -263,20 +263,20 @@ class Android17PromotionReducerTest(unittest.TestCase):
                     "overridden to 'enabled'"
                 ),
                 "Feature 'GuestAngle' overridden to 'disabled'",
+                REDUCER.RENDERER_TUPLE,
                 (
                     "Deciding if GLDirectMem/Vulkan should be enabled. "
                     "Selected GLES renderer: Swiftshader Indirect "
                     "Selected Vulkan renderer: Swiftshader Indirect "
                     "API level: 3 "
                 ),
-                REDUCER.RENDERER_TUPLE,
                 "gfxstreamFeature:Vulkan = 0",
                 "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 1",
                 "gfxstreamFeature:VulkanNativeSwapchain = 0",
-                "gfxstreamFeature:GuestVulkanOnly = 0",
                 "gfxstreamFeature:GlDma = 1",
                 "gfxstreamFeature:GlDma2 = 0",
                 "gfxstreamFeature:GlDirectMem = 1",
+                "gfxstreamFeature:GuestVulkanOnly = 0",
             ]) + "\n",
             encoding="utf-8",
         )

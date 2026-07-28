@@ -132,6 +132,48 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Evidence is hashed before this script returns, so the background Emulator
+# process must close its log writer before the raw manifest is created.
+# Otherwise the EXIT cleanup can append normal shutdown lines after sealing
+# and make an otherwise valid gate fail its own immutable-evidence audit.
+stop_emulator_before_evidence_seal() {
+  local emulator_exit_code=0
+  local log_hash_after
+  local log_hash_before
+
+  if [[ -z "$emulator_pid" ]]; then
+    echo "Android Emulator was already stopped before evidence sealing" >&2
+    return 1
+  fi
+  timeout --signal=TERM --kill-after=5s 15s \
+    adb -s "$device_serial" emu kill >/dev/null 2>&1 \
+    || true
+  if ! timeout --signal=TERM --kill-after=5s 15s \
+      tail --pid="$emulator_pid" -f /dev/null; then
+    kill "$emulator_pid" >/dev/null 2>&1 || true
+    sleep 1
+    kill -9 "$emulator_pid" >/dev/null 2>&1 || true
+  fi
+  if kill -0 "$emulator_pid" >/dev/null 2>&1; then
+    echo "Android Emulator remained alive during evidence sealing" >&2
+    return 1
+  fi
+  wait "$emulator_pid" >/dev/null 2>&1 \
+    || emulator_exit_code="$?"
+  emulator_pid=""
+  printf 'commanded_shutdown_exit_code=%s\n' "$emulator_exit_code" \
+    > "$evidence/EMULATOR-PROCESS-EXIT.txt"
+
+  log_hash_before="$(
+    sha256sum "$evidence/logs/emulator.log" | cut -d' ' -f1
+  )"
+  sleep 0.1
+  log_hash_after="$(
+    sha256sum "$evidence/logs/emulator.log" | cut -d' ' -f1
+  )"
+  test "$log_hash_before" = "$log_hash_after"
+}
+
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 command -v adb
 
@@ -1140,6 +1182,7 @@ if [[ "$gate_mode" == "boot" ]]; then
   cmp \
     "$evidence/SYSTEM-IMAGE-SHA256SUMS" \
     "$evidence/SYSTEM-IMAGE-SHA256SUMS-AFTER"
+  stop_emulator_before_evidence_seal
   (
     cd "$evidence"
     find . -type f \
@@ -1561,6 +1604,7 @@ write_system_image_manifest \
 cmp \
   "$evidence/SYSTEM-IMAGE-SHA256SUMS" \
   "$evidence/SYSTEM-IMAGE-SHA256SUMS-AFTER"
+stop_emulator_before_evidence_seal
 (
   cd "$evidence"
   find . -type f \

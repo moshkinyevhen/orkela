@@ -200,6 +200,21 @@ Local public-pin evidence:
   the candidate produced zero SurfaceFlinger, ANGLE, or MESA fatal evidence,
   `sys.boot_completed=1`, and `ro.hardware.egl=emulation`. This is a bounded
   backend/startup result, not yet an APK or release promotion.
+- Same-host causal run
+  [`30399094666`](https://github.com/moshkinyevhen/orkela/actions/runs/30399094666)
+  isolated the corrected Android 17 ReadColorBufferDMA capability bridge. With
+  `GlDirectMem` and shared host slots disabled, the guest produced 25 target
+  RegionSampling crash signatures and 22 SurfaceFlinger PID changes. Enabling
+  exactly those two prerequisites retained `GlDma=1`, produced zero crashes
+  and zero PID changes, passed 24/24 soak observations, and yielded four valid
+  screenshots. The result remains diagnostic-only until the complete
+  cold-boot and exact-APK promotion gate passes.
+- Android promotion evidence now stops and reaps the Emulator before hashing
+  its raw log, so normal shutdown lines cannot mutate an already sealed
+  manifest. The reducer validates the real partial order of graphics startup
+  phases while treating the diagnostic field-dump order as semantically
+  unordered. Reprocessing the completed 3x4-KiB and 3x16-KiB evidence from run
+  `30399084868` then produced `ANDROID17_COLD_PROMOTION_PASSED`.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.

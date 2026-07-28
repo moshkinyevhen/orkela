@@ -426,3 +426,65 @@ Primary source basis:
 - [Android 17 Goldfish mapper](https://android.googlesource.com/device/generic/goldfish/+/refs/tags/android-17.0.0_r1/hals/gralloc/mapper.cpp)
 - [Android 17 gfxstream render-control capability](https://android.googlesource.com/platform/hardware/google/gfxstream/+/refs/tags/android-17.0.0_r1/host/render_control.cpp)
 - [AEMU API-gated graphics selection](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android-qemu2-glue/main.cpp)
+
+## ReadColorBufferDMA causal result
+
+[GitHub run 30399094666](https://github.com/moshkinyevhen/orkela/actions/runs/30399094666)
+completed the deliberately minimal same-host intervention on commit
+`cfe08f3ccade873b9bf9be9fbd3b182679c086d4`. Both cells used the same runner,
+kernel boot ID, verified Emulator 37.2.1 archive, verified Android 17 4-KiB
+guest bytes, SwiftShader renderer, Vulkan-disabled route, enforcing SELinux,
+and unmodified luma policy. The only causal coordinate was the pair required
+to advertise ReadColorBufferDMA:
+
+| Evidence | Prerequisites off | Prerequisites on |
+| --- | ---: | ---: |
+| Effective `GlDirectMem` | 0 | 1 |
+| Effective shared host slots | 0 | 1 |
+| Effective `GlDma` / `GlDma2` | 1 / 0 | 1 / 0 |
+| Target RegionSampling crash signatures | 25 | 0 |
+| SurfaceFlinger PID changes | 22 | 0 |
+| Healthy soak observations | 8 / 24 | 24 / 24 |
+| Valid screenshots | 0 / 4 | 4 / 4 |
+| Final `updatable_crashing` process | `surfaceflinger` | empty |
+
+The assessor emitted
+`READ_COLOR_BUFFER_DMA_CAUSAL_AB_PASSED`, retained
+`promotion_eligible=false`, and recorded the host parser decision as API 3.
+The downloaded raw artifact was independently reprocessed on Windows; its
+assessment JSON was semantically identical to the GitHub-produced assessment
+(the byte difference was CRLF versus LF line endings only).
+
+This closes the causal renderer question without expanding the renderer
+matrix. Public promotion still requires the one contracted 3x4-KiB +
+3x16-KiB cold-boot gate and exact-APK runtime decode on both Android 17 page
+sizes.
+
+## First full cold-promotion execution
+
+Attempt 2 of
+[GitHub run 30399084868](https://github.com/moshkinyevhen/orkela/actions/runs/30399084868)
+passed API 26 and all six required Android 17 cold boots:
+
+- three fresh 4-KiB guests;
+- three fresh 16-KiB guests;
+- 24/24 healthy observations, one SurfaceFlinger lifetime, four valid
+  screenshots, and zero target crash signatures for every cold boot.
+
+The first reducer invocation rejected the evidence because the gate had
+hashed `logs/emulator.log` before its EXIT cleanup appended normal Emulator
+shutdown lines. Every one of the six cold gates and the API-26 runtime gate
+showed this same single-file mismatch. After downloading the complete
+artifact, recomputing only the seven raw manifests over the now-closed logs,
+and updating their manifest digests, the corrected reducer emitted:
+
+```text
+ANDROID17_COLD_PROMOTION_PASSED
+```
+
+The source gate now stops and reaps the Emulator, records its commanded exit,
+checks that the closed log hash remains stable, and only then writes the raw
+manifest. The reducer also now validates the actual partial order of startup
+phases rather than requiring a semantically meaningless total order among
+effective feature-state log lines. These infrastructure corrections must pass
+on the committed source before exact-APK promotion and packaging continue.

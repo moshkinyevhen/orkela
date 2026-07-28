@@ -545,13 +545,19 @@ def validate_emulator_log(root: Path) -> None:
         r"Could not start renderer"
     )
     require_regex_count(text, forbidden, 0, str(path))
-    ordered_markers = (
-        f"parseAndApplyOverrides, overrides='{FEATURE_TUPLE}'",
+    override_request = (
+        f"parseAndApplyOverrides, overrides='{FEATURE_TUPLE}'"
+    )
+    override_confirmations = (
         "Feature 'GLDirectMem'",
         "Feature 'HasSharedSlotsHostMemoryAllocator'",
         "Feature 'GuestAngle'",
+    )
+    configuration_markers = (
         "API level: 3 ",
         RENDERER_TUPLE,
+    )
+    effective_state_markers = (
         "gfxstreamFeature:Vulkan = 0",
         "gfxstreamFeature:HasSharedSlotsHostMemoryAllocator = 1",
         "gfxstreamFeature:VulkanNativeSwapchain = 0",
@@ -560,10 +566,42 @@ def validate_emulator_log(root: Path) -> None:
         "gfxstreamFeature:GlDma2 = 0",
         "gfxstreamFeature:GlDirectMem = 1",
     )
-    positions = [text.find(marker) for marker in ordered_markers]
+    request_position = text.find(override_request)
+    confirmation_positions = [
+        text.find(marker) for marker in override_confirmations
+    ]
+    configuration_positions = [
+        text.find(marker) for marker in configuration_markers
+    ]
+    state_positions = [
+        text.find(marker) for marker in effective_state_markers
+    ]
+    positions = [
+        request_position,
+        *confirmation_positions,
+        *configuration_positions,
+        *state_positions,
+    ]
     if any(position < 0 for position in positions):
         fail(f"{path}: an ordered graphics marker is absent")
-    if positions != sorted(positions) or len(set(positions)) != len(positions):
+    if len(set(positions)) != len(positions):
+        fail(f"{path}: graphics initialization order is contradictory")
+    if not all(
+        request_position < position
+        for position in confirmation_positions
+    ):
+        fail(f"{path}: graphics initialization order is contradictory")
+    if not all(
+        confirmation_position < configuration_position
+        for confirmation_position in confirmation_positions
+        for configuration_position in configuration_positions
+    ):
+        fail(f"{path}: graphics initialization order is contradictory")
+    if not all(
+        configuration_position < state_position
+        for configuration_position in configuration_positions
+        for state_position in state_positions
+    ):
         fail(f"{path}: graphics initialization order is contradictory")
 
 
