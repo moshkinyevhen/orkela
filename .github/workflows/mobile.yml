@@ -377,8 +377,12 @@ jobs:
           unzip -q "$archive" -d "$pinned"
           emulator_bin="$pinned/emulator/emulator"
           test -x "$emulator_bin"
-          test "$(
+          emulator_version_output="$(
             "$emulator_bin" -version 2>&1 \
+              || true
+          )"
+          test "$(
+            printf '%s\n' "$emulator_version_output" \
               | sed -n \
                 's/^Android emulator version \([^ ]*\).*/\1/p' \
               | head -n 1
