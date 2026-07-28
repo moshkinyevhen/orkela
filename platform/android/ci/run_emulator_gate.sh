@@ -98,7 +98,23 @@ for _ in $(seq 1 150); do
 done
 test "$ready" -eq 1
 adb shell getprop ro.build.version.sdk | tr -d '\r' | grep -Fxq "$runtime_api"
-actual_page_size="$(adb shell getconf PAGE_SIZE | tr -d '\r')"
+# Android 8 / API 26 does not ship the `getconf` shell utility. Read the
+# kernel-reported mapping page size instead; unlike a build property, this
+# measures the runtime that is actually executing the APK gate.
+actual_page_kib="$(
+  adb shell cat /proc/self/smaps \
+    | tr -d '\r' \
+    | awk '
+        $1 == "KernelPageSize:" && $3 == "kB" {
+          value = $2
+        }
+        END {
+          print value
+        }
+      '
+)"
+test -n "$actual_page_kib"
+actual_page_size="$((actual_page_kib * 1024))"
 test "$actual_page_size" -eq "$expected_page_size"
 adb shell getprop > "$evidence/DEVICE-PROPERTIES.txt"
 
