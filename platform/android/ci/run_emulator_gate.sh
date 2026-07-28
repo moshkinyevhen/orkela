@@ -184,6 +184,15 @@ fi
 # `sys.boot_completed=1` can precede the end of first-boot package and
 # animation work. Require several consecutive healthy service observations so
 # instrumentation never races a newly started API 37 system_server.
+#
+# Keep every observation. A readiness failure happens before the application
+# is installed, so without this ledger it is impossible to distinguish a slow
+# first boot from a missing Binder service, storage transition, or compositor
+# restart on the exact pinned system image.
+readiness_log="$evidence/logs/services-readiness.log"
+printf '%s\n' \
+  "utc,seconds,healthy,stable,package,surfaceflinger,mount,bootanim,storage_ready,volumes" \
+  > "$readiness_log"
 stable_observations=0
 services_deadline=$((SECONDS + 90))
 while ((SECONDS < services_deadline)); do
@@ -220,6 +229,7 @@ while ((SECONDS < services_deadline)); do
     boot_animation_ready=1
   fi
   storage_ready=1
+  storage_volumes="not-required"
   if [[ "$runtime_api" -ge 37 ]]; then
     storage_volumes="$(
       timeout --signal=TERM --kill-after=5s 10s \
@@ -229,26 +239,115 @@ while ((SECONDS < services_deadline)); do
         || true
     )"
     storage_ready=0
-    if grep -Eq "^private mounted" <<< "$storage_volumes" \
-        && grep -Eq "^emulated;0 mounted" <<< "$storage_volumes"; then
+    if grep -Eq "^private mounted([[:space:]]|$)" <<< "$storage_volumes" \
+        && grep -Eq "^emulated;0 mounted([[:space:]]|$)" \
+          <<< "$storage_volumes"; then
       storage_ready=1
     fi
   fi
-  if [[ "$package_service" == *"found"* \
-      && "$surfaceflinger_service" == *"found"* \
-      && "$mount_service" == *"found"* \
+  package_service_log="$(
+    printf '%s' "$package_service" | tr '\r\n\t,' '    '
+  )"
+  surfaceflinger_service_log="$(
+    printf '%s' "$surfaceflinger_service" | tr '\r\n\t,' '    '
+  )"
+  mount_service_log="$(
+    printf '%s' "$mount_service" | tr '\r\n\t,' '    '
+  )"
+  boot_animation_log="$(
+    printf '%s' "${boot_animation:-empty}" | tr '\r\n\t,' '    '
+  )"
+  storage_volumes_log="$(
+    printf '%s' "$storage_volumes" | tr '\r\n\t,' '    '
+  )"
+  readiness_healthy=0
+  if [[ "$package_service" == "Service package: found" \
+      && "$surfaceflinger_service" == "Service SurfaceFlinger: found" \
+      && "$mount_service" == "Service mount: found" \
       && "$boot_animation_ready" -eq 1 \
       && "$storage_ready" -eq 1 ]]; then
+    readiness_healthy=1
     stable_observations=$((stable_observations + 1))
-    if [[ "$stable_observations" -ge 5 ]]; then
-      break
-    fi
   else
     stable_observations=0
+  fi
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+    "$SECONDS" \
+    "$readiness_healthy" \
+    "$stable_observations" \
+    "$package_service_log" \
+    "$surfaceflinger_service_log" \
+    "$mount_service_log" \
+    "$boot_animation_log" \
+    "$storage_ready" \
+    "$storage_volumes_log" \
+    >> "$readiness_log"
+  if [[ "$stable_observations" -ge 5 ]]; then
+    break
   fi
   sleep 2
 done
 if [[ "$stable_observations" -lt 5 ]]; then
+  {
+    echo "gate=$gate"
+    echo "runtime_api=$runtime_api"
+    echo "device_serial=$device_serial"
+    echo "seconds=$SECONDS"
+    echo "stable_observations=$stable_observations"
+    echo "package_service=$package_service"
+    echo "surfaceflinger_service=$surfaceflinger_service"
+    echo "mount_service=$mount_service"
+    echo "boot_animation=${boot_animation:-empty}"
+    echo "storage_ready=$storage_ready"
+    echo "storage_volumes_begin"
+    printf '%s\n' "$storage_volumes"
+    echo "storage_volumes_end"
+  } > "$evidence/SERVICES-READINESS-FAILURE.txt"
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" shell getprop \
+    > "$evidence/logs/device-properties-readiness-failure.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" shell service list \
+    > "$evidence/logs/service-list-readiness-failure.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" shell sm list-volumes all \
+    > "$evidence/logs/storage-volumes-readiness-failure.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 20s \
+    adb -s "$device_serial" shell df -k \
+    > "$evidence/logs/filesystems-readiness-failure.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 30s \
+    adb -s "$device_serial" logcat -b crash -d \
+    > "$evidence/logs/logcat-crash-readiness-failure.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 45s \
+    adb -s "$device_serial" logcat -b all -d \
+    > "$evidence/logs/logcat-all-readiness-failure.txt" \
+    2>&1 \
+    || true
+  {
+    printf 'surfaceflinger='
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell pidof surfaceflinger \
+      2>&1 \
+      || true
+    printf '\n'
+    printf 'system_server='
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell pidof system_server \
+      2>&1 \
+      || true
+    printf '\n'
+  } > "$evidence/logs/core-pids-readiness-failure.txt"
   echo "Android system services did not become stably ready" >&2
   exit 1
 fi
