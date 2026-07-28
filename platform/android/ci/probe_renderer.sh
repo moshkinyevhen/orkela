@@ -5,7 +5,7 @@
 
 set -u -o pipefail
 
-renderer="${1:?usage: probe_renderer.sh <swiftshader|lavapipe|swangle|host>}"
+renderer="${1:?usage: probe_renderer.sh <renderer> [cell-id]}"
 case "$renderer" in
   swiftshader|lavapipe|swangle|host) ;;
   *)
@@ -13,17 +13,29 @@ case "$renderer" in
     exit 2
     ;;
 esac
+cell_id="${2:-$renderer}"
+if [[ ! "$cell_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  echo "Unsafe probe cell ID: $cell_id" >&2
+  exit 2
+fi
 
 system_image="system-images;android-37.0;google_apis;x86_64"
 expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
-expected_emulator_version="36.6.11.0"
+expected_emulator_version="${ORKELA_EXPECTED_EMULATOR_VERSION:-36.6.11.0}"
+expected_guest_hash_set="${ORKELA_EXPECTED_GUEST_HASH_SET:-android17-r06-google-apis-x86_64-4k-v1}"
+archive_revision="${ORKELA_EMULATOR_REVISION:-36.6.11}"
+archive_build_id="${ORKELA_EMULATOR_BUILD_ID:-15507667}"
+archive_url="${ORKELA_EMULATOR_ARCHIVE_URL:-https://dl.google.com/android/repository/emulator-linux_x64-15507667.zip}"
+archive_sha1="${ORKELA_EMULATOR_ARCHIVE_SHA1:-f8d8b83cf21a04966326eb1378bacda255f63b93}"
+archive_sha256="${ORKELA_EMULATOR_ARCHIVE_SHA256:-1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830}"
+archive_size="${ORKELA_EMULATOR_ARCHIVE_SIZE:-331232577}"
 emulator_bin="${ORKELA_EMULATOR_BIN:-$ANDROID_HOME/emulator/emulator}"
 emulator_console_port=5554
 device_serial="emulator-$emulator_console_port"
-avd_name="orkela-renderer-probe-$renderer"
+avd_name="orkela-renderer-probe-$cell_id"
 evidence_root="${ORKELA_RENDERER_PROBE_ROOT:-build/android37-renderer-probe}"
-evidence="$evidence_root/$renderer"
-export ANDROID_USER_HOME="${ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-renderer-probe-$renderer}"
+evidence="$evidence_root/$cell_id"
+export ANDROID_USER_HOME="${ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-renderer-probe-$cell_id}"
 export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
@@ -50,6 +62,7 @@ effective_renderer_line=""
 known_failing_tuple=false
 stage1_candidate=false
 known_control_crash_reproduced=false
+control_crash_signature_reproduced=false
 crash_evidence_complete=false
 pre_soak_log_ok=false
 post_soak_log_ok=false
@@ -239,14 +252,21 @@ if [[ "$boot_completed" == "true" ]]; then
     record_failure "display-size-query"
   fi
   {
+    echo "cell_id=$cell_id"
     echo "requested_renderer=$renderer"
     echo "fingerprint=$observed_fingerprint"
     echo "selinux=$observed_selinux"
     echo "luma_sampling=${observed_luma:-default}"
     echo "page_size=$observed_page_size"
     echo "display_size=${display_width}x${display_height}"
-    echo "emulator_archive_sha256=${ORKELA_EMULATOR_ARCHIVE_SHA256:-missing}"
+    echo "emulator_revision=$archive_revision"
+    echo "emulator_build_id=$archive_build_id"
+    echo "emulator_archive_url=$archive_url"
+    echo "emulator_archive_sha1=$archive_sha1"
+    echo "emulator_archive_sha256=$archive_sha256"
+    echo "emulator_archive_size=$archive_size"
     echo "emulator_archive_verified=${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-false}"
+    echo "guest_hash_set=${ORKELA_GUEST_HASH_SET:-missing}"
     echo "system_image_hashes_verified=${ORKELA_IMAGE_HASHES_VERIFIED:-false}"
   } > "$evidence/GUEST-ENVIRONMENT.txt"
   if [[ "$observed_fingerprint" != "$expected_fingerprint" ]]; then
@@ -277,6 +297,7 @@ if [[ "$boot_completed" == "true" ]]; then
       && "$display_width" -gt 0 \
       && "$display_height" -gt 0 \
       && "${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-false}" == "true" \
+      && "${ORKELA_GUEST_HASH_SET:-missing}" == "$expected_guest_hash_set" \
       && "${ORKELA_IMAGE_HASHES_VERIFIED:-false}" == "true" ]]; then
     environment_exact=true
   fi
@@ -421,7 +442,7 @@ if [[ "$boot_completed" == "true" ]]; then
         "$evidence/logs/emulator.log" \
         "$evidence/logs/logcat-pre-soak.txt" \
         "$evidence/logs/logcat-soak.txt"; then
-    known_control_crash_reproduced=true
+    control_crash_signature_reproduced=true
   fi
   if python3 platform/android/ci/validate_probe_pngs.py \
       "$evidence/screenshots/soak-1.png" \
@@ -470,15 +491,25 @@ effective_renderer_line="$(
 if [[ "$effective_renderer_count" -ne 1 ]]; then
   record_failure "effective-renderer-tuple-count:$effective_renderer_count"
 fi
-# The generic software selector already proved this mixed tuple unstable on
-# the same pinned GitHub runner/image pair. A nominally different selector
-# that resolves to it is evidence of fallback, not an independent candidate.
-if grep -Eq \
-    "setCurrentRenderer: (swangle lavapipe|swiftshader swiftshader)" \
-    "$evidence/EFFECTIVE-RENDERER-TUPLES.txt"; then
+# A known failure is scoped by the full causal environment. A newer Emulator
+# remains eligible even when it reports the same human-readable renderer tuple.
+if [[ ( "$cell_id" == "control-36_6_11-swiftshader" \
+      || "$cell_id" == "swiftshader" ) \
+    && "$renderer" == "swiftshader" \
+    && "$emulator_version" == "36.6.11.0" \
+    && "$archive_sha256" == \
+      "1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830" \
+    && "${ORKELA_GUEST_HASH_SET:-missing}" == \
+      "android17-r06-google-apis-x86_64-4k-v1" \
+    && "$effective_renderer_count" -eq 1 ]] \
+    && grep -Fq \
+      "setCurrentRenderer: swiftshader swiftshader" \
+      "$evidence/EFFECTIVE-RENDERER-TUPLES.txt"; then
   known_failing_tuple=true
-  if [[ "$renderer" == "lavapipe" || "$renderer" == "swangle" ]]; then
-    record_failure "effective-renderer-collapsed-to-known-failing-tuple"
+  if [[ "$environment_exact" == "true" \
+      && "$crash_evidence_complete" == "true" \
+      && "$control_crash_signature_reproduced" == "true" ]]; then
+    known_control_crash_reproduced=true
   fi
 fi
 
@@ -494,7 +525,9 @@ if [[ "$environment_exact" == "true" \
   stable=true
 fi
 deterministic_candidate=false
-if [[ "$renderer" == "lavapipe" || "$renderer" == "swangle" ]]; then
+if [[ "$cell_id" == candidate-* && "$renderer" != "host" ]] \
+    || [[ "$cell_id" == "$renderer" \
+      && ( "$renderer" == "lavapipe" || "$renderer" == "swangle" ) ]]; then
   deterministic_candidate=true
 fi
 if [[ "$stable" == "true" \
@@ -503,9 +536,19 @@ if [[ "$stable" == "true" \
   stage1_candidate=true
 fi
 
+CELL_ID="$cell_id" \
 RENDERER="$renderer" \
 EXPECTED_EMULATOR_VERSION="$expected_emulator_version" \
 EMULATOR_VERSION="$emulator_version" \
+ARCHIVE_REVISION="$archive_revision" \
+ARCHIVE_BUILD_ID="$archive_build_id" \
+ARCHIVE_URL="$archive_url" \
+ARCHIVE_SHA1="$archive_sha1" \
+ARCHIVE_SHA256="$archive_sha256" \
+ARCHIVE_SIZE="$archive_size" \
+ARCHIVE_VERIFIED="${ORKELA_EMULATOR_ARCHIVE_VERIFIED:-false}" \
+EXPECTED_GUEST_HASH_SET="$expected_guest_hash_set" \
+GUEST_HASH_SET="${ORKELA_GUEST_HASH_SET:-missing}" \
 EXPECTED_FINGERPRINT="$expected_fingerprint" \
 OBSERVED_FINGERPRINT="$observed_fingerprint" \
 OBSERVED_SELINUX="$observed_selinux" \
@@ -526,6 +569,14 @@ EFFECTIVE_RENDERER_COUNT="$effective_renderer_count" \
 KNOWN_FAILING_TUPLE="$known_failing_tuple" \
 STAGE1_CANDIDATE="$stage1_candidate" \
 KNOWN_CONTROL_CRASH_REPRODUCED="$known_control_crash_reproduced" \
+EXPECTED_CONTROL_FAILURE="$(
+  if [[ "$cell_id" == "control-36_6_11-swiftshader" \
+      || "$cell_id" == "swiftshader" ]]; then
+    echo true
+  else
+    echo false
+  fi
+)" \
 CRASH_EVIDENCE_COMPLETE="$crash_evidence_complete" \
 DISPLAY_WIDTH="$display_width" \
 DISPLAY_HEIGHT="$display_height" \
@@ -549,10 +600,11 @@ failures = [
 print(json.dumps({
     "schema": 1,
     "purpose": "Android 17 renderer isolation probe; no Orkela APK installed",
+    "cell_id": os.environ["CELL_ID"],
     "renderer": os.environ["RENDERER"],
     "effective_renderer_line": os.environ["EFFECTIVE_RENDERER_LINE"],
     "effective_renderer_count": int(os.environ["EFFECTIVE_RENDERER_COUNT"]),
-    "expected_control_failure": os.environ["RENDERER"] == "swiftshader",
+    "expected_control_failure": boolean("EXPECTED_CONTROL_FAILURE"),
     "known_control_crash_reproduced": boolean(
         "KNOWN_CONTROL_CRASH_REPRODUCED"
     ),
@@ -565,8 +617,17 @@ print(json.dumps({
     "emulator": {
         "expected": os.environ["EXPECTED_EMULATOR_VERSION"],
         "observed": os.environ["EMULATOR_VERSION"],
+        "revision": os.environ["ARCHIVE_REVISION"],
+        "build_id": int(os.environ["ARCHIVE_BUILD_ID"]),
+        "archive_url": os.environ["ARCHIVE_URL"],
+        "archive_sha1": os.environ["ARCHIVE_SHA1"],
+        "archive_sha256": os.environ["ARCHIVE_SHA256"],
+        "archive_size": int(os.environ["ARCHIVE_SIZE"]),
+        "archive_verified": boolean("ARCHIVE_VERIFIED"),
     },
     "guest": {
+        "expected_hash_set": os.environ["EXPECTED_GUEST_HASH_SET"],
+        "hash_set": os.environ["GUEST_HASH_SET"],
         "expected_fingerprint": os.environ["EXPECTED_FINGERPRINT"],
         "observed_fingerprint": os.environ["OBSERVED_FINGERPRINT"],
         "selinux": os.environ["OBSERVED_SELINUX"],

@@ -114,14 +114,15 @@ Local public-pin evidence:
 
 ### Fixed
 
-- Android 17 emulator gates now select the official unified SwiftShader
-  software renderer instead of Emulator's unstable mixed swangle/lavapipe
-  `software` selection. The Android guest, DMA features, luma sampling,
-  compositor, and RegionSampling remain unchanged. Each gate requires a
-  measured 120-second compositor soak, one SurfaceFlinger lifetime, healthy
-  services/storage at all 24 bounded observations, zero matching crash
-  signatures, and four complete, visually non-uniform CRC-valid screenshots
-  before application testing begins.
+- Android 17 renderer diagnosis is now fail-closed and evidence-gated. The
+  isolated GitHub matrix proved that Emulator `36.6.11.0` crashes the pinned
+  Android 17 compositor with SwiftShader, swangle/SwiftShader, and
+  swangle/lavapipe; the host backend never reached ADB. The gate preserves the
+  stock guest and requires a 120-second compositor soak, one SurfaceFlinger
+  lifetime, 24 healthy service/storage observations, zero matching crash
+  signatures, and four decoded, CRC-valid non-uniform screenshots before any
+  backend can become a candidate. Release promotion remains blocked while
+  adjacent official Emulator packages are tested.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.

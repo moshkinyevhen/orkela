@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      emulator_probe:
+        description: Run only the version-scoped Android 17 Emulator matrix
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -30,7 +35,9 @@ env:
 jobs:
   android:
     name: Android API-26/API-37 application
-    if: github.event_name != 'workflow_dispatch' || inputs.renderer_probe != true
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || (inputs.renderer_probe != true && inputs.emulator_probe != true)
     runs-on: ubuntu-24.04
     timeout-minutes: 110
     steps:
@@ -366,6 +373,10 @@ jobs:
               | sha256sum -c -
           )
           echo "ORKELA_IMAGE_HASHES_VERIFIED=true" >> "$GITHUB_ENV"
+          echo "ORKELA_EXPECTED_GUEST_HASH_SET=android17-r06-google-apis-x86_64-4k-v1" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_GUEST_HASH_SET=android17-r06-google-apis-x86_64-4k-v1" \
+            >> "$GITHUB_ENV"
 
           archive="$RUNNER_TEMP/emulator-linux_x64-15507667.zip"
           pinned="$RUNNER_TEMP/android-emulator-36.6.11"
@@ -397,7 +408,17 @@ jobs:
           printf 'Parsed emulator version: %s\n' "$parsed_emulator_version"
           test "$parsed_emulator_version" = "36.6.11.0"
           echo "ORKELA_EMULATOR_BIN=$emulator_bin" >> "$GITHUB_ENV"
+          echo "ORKELA_EXPECTED_EMULATOR_VERSION=36.6.11.0" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_REVISION=36.6.11" >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_BUILD_ID=15507667" >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_URL=https://dl.google.com/android/repository/emulator-linux_x64-15507667.zip" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_SHA1=f8d8b83cf21a04966326eb1378bacda255f63b93" \
+            >> "$GITHUB_ENV"
           echo "ORKELA_EMULATOR_ARCHIVE_SHA256=$actual_archive_sha256" \
+            >> "$GITHUB_ENV"
+          echo "ORKELA_EMULATOR_ARCHIVE_SIZE=331232577" \
             >> "$GITHUB_ENV"
           echo "ORKELA_EMULATOR_ARCHIVE_VERIFIED=true" >> "$GITHUB_ENV"
           sudo chown "$(id -un)" /dev/kvm
@@ -536,9 +557,179 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  android-emulator-probe:
+    name: Android 17 Emulator / ${{ matrix.cell_id }}
+    if: github.event_name == 'workflow_dispatch' && inputs.emulator_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell_id: control-36_6_11-swiftshader
+            renderer: swiftshader
+            revision: 36.6.11
+            build_id: "15507667"
+            archive_sha1: f8d8b83cf21a04966326eb1378bacda255f63b93
+            archive_sha256: 1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830
+            archive_size: "331232577"
+            binary_version: 36.6.11.0
+          - cell_id: candidate-37_1_10-swiftshader
+            renderer: swiftshader
+            revision: 37.1.10
+            build_id: "15888535"
+            archive_sha1: 489e57e560e310f9dfadf098951a713bf5651cd2
+            archive_sha256: 5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317
+            archive_size: "334377561"
+            binary_version: 37.1.10.0
+          - cell_id: candidate-37_1_10-swangle
+            renderer: swangle
+            revision: 37.1.10
+            build_id: "15888535"
+            archive_sha1: 489e57e560e310f9dfadf098951a713bf5651cd2
+            archive_sha256: 5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317
+            archive_size: "334377561"
+            binary_version: 37.1.10.0
+          - cell_id: candidate-37_1_10-lavapipe
+            renderer: lavapipe
+            revision: 37.1.10
+            build_id: "15888535"
+            archive_sha1: 489e57e560e310f9dfadf098951a713bf5651cd2
+            archive_sha256: 5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317
+            archive_size: "334377561"
+            binary_version: 37.1.10.0
+          - cell_id: candidate-37_2_1-swiftshader
+            renderer: swiftshader
+            revision: 37.2.1
+            build_id: "15875889"
+            archive_sha1: 1c39ceb4bca042b973344d252a051189d367ab83
+            archive_sha256: 3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d
+            archive_size: "346539649"
+            binary_version: 37.2.1.0
+          - cell_id: candidate-37_2_1-swangle
+            renderer: swangle
+            revision: 37.2.1
+            build_id: "15875889"
+            archive_sha1: 1c39ceb4bca042b973344d252a051189d367ab83
+            archive_sha256: 3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d
+            archive_size: "346539649"
+            binary_version: 37.2.1.0
+          - cell_id: candidate-37_2_1-lavapipe
+            renderer: lavapipe
+            revision: 37.2.1
+            build_id: "15875889"
+            archive_sha1: 1c39ceb4bca042b973344d252a051189d367ab83
+            archive_sha256: 3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d
+            archive_size: "346539649"
+            binary_version: 37.2.1.0
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Install exact guest and Emulator package
+        shell: bash
+        run: |
+          bash platform/android/ci/prepare_emulator_probe.sh \
+            "${{ matrix.revision }}" \
+            "${{ matrix.build_id }}" \
+            "${{ matrix.archive_sha1 }}" \
+            "${{ matrix.archive_sha256 }}" \
+            "${{ matrix.archive_size }}" \
+            "${{ matrix.binary_version }}"
+
+      - name: Probe exact version and renderer
+        shell: bash
+        run: |
+          bash platform/android/ci/probe_renderer.sh \
+            "${{ matrix.renderer }}" \
+            "${{ matrix.cell_id }}"
+
+      - name: Upload exact probe evidence
+        if: always()
+        id: upload-emulator-probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-emulator-${{ matrix.cell_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android37-renderer-probe/${{ matrix.cell_id }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize exact probe result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="build/android37-renderer-probe/${{ matrix.cell_id }}/PROBE-RESULT.json"
+          test -s "$result"
+          {
+            echo "### Android 17 Emulator: ${{ matrix.cell_id }}"
+            echo "- Stable: $(jq -r .stable "$result")"
+            echo "- Stage-1 candidate: $(jq -r .stage1_candidate "$result")"
+            echo "- Exact control crash: $(jq -r .known_control_crash_reproduced "$result")"
+            echo "- Effective renderer: $(jq -r .effective_renderer_line "$result")"
+            echo "- Exact environment: $(jq -r .environment_exact "$result")"
+            echo "- Healthy observations: $(jq -r .soak.healthy_observations "$result") / 24"
+            echo "- SurfaceFlinger PID changes: $(jq -r .soak.pid_changes "$result")"
+            echo "- Crash signatures: $(jq -r .soak.crash_signatures "$result")"
+            echo "- Valid screenshots: $(jq -r .soak.valid_screenshots "$result") / 4"
+            echo "- Artifact ID: ${{ steps.upload-emulator-probe.outputs.artifact-id }}"
+            echo "- Diagnostic only: no Orkela APK was installed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-emulator-assessment:
+    name: Android 17 Emulator assessment
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.emulator_probe == true
+    needs:
+      - android-emulator-probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download every version-scoped probe result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Orkela-Android17-emulator-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-artifacts
+
+      - name: Reduce exact matrix into one evidence verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 platform/android/ci/reduce_emulator_probe.py \
+            probe-artifacts \
+            ANDROID17-EMULATOR-ASSESSMENT.json \
+            PROMOTION-CANDIDATE.json
+          {
+            echo "## Android 17 Emulator assessment"
+            echo "- Control crash reproduced: $(jq -r .control_reproduced ANDROID17-EMULATOR-ASSESSMENT.json)"
+            echo "- Stage-1 candidates: $(jq -r '.stage1_candidates | join(\", \")' ANDROID17-EMULATOR-ASSESSMENT.json)"
+            echo "- Promotion candidate: $(jq -r .cell_id PROMOTION-CANDIDATE.json)"
+            echo "- Next gate: same archive and tuple, 3 cold 4K + 3 cold 16K boots, then the exact Orkela APK pair"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload exact assessment and promotion identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-emulator-assessment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ANDROID17-EMULATOR-ASSESSMENT.json
+            PROMOTION-CANDIDATE.json
+          if-no-files-found: warn
+          retention-days: 14
+
   ios:
     name: iOS ${{ matrix.target }}
-    if: github.event_name != 'workflow_dispatch' || inputs.renderer_probe != true
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || (inputs.renderer_probe != true && inputs.emulator_probe != true)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
@@ -851,7 +1042,12 @@ jobs:
 
   orkela-mobile-gate:
     name: orkela-mobile-gate
-    if: always() && (github.event_name != 'workflow_dispatch' || inputs.renderer_probe != true)
+    if: >-
+      always()
+      && (
+        github.event_name != 'workflow_dispatch'
+        || (inputs.renderer_probe != true && inputs.emulator_probe != true)
+      )
     needs:
       - android
       - ios

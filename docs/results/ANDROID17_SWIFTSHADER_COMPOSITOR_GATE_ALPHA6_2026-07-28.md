@@ -1,94 +1,116 @@
-# Android 17 SwiftShader Compositor Gate
+# Android 17 Software-Renderer Compositor Gate
 
-Date: 2026-07-28  
-Candidate: `0.3.0-alpha.6`  
-System images: Android 17 build `CE2A.260420.019`, 4 KiB and 16 KiB x86-64  
-Emulator: `36.6.11`  
-Status: **LOCAL 4-KIB/16-KIB CAUSAL GATE PASS; GITHUB LINUX GATE PENDING**
+Date: 2026-07-28
+
+Candidate: `0.3.0-alpha.6`
+
+Source: `68580b576a44cadbff0e29d95b91294098dc3cec`
+
+GitHub Actions run:
+[`30360265886`](https://github.com/moshkinyevhen/orkela/actions/runs/30360265886)
+
+System image: Android 17 build `CE2A.260420.019`, 4 KiB x86-64
+
+Emulator: `36.6.11.0`
+
+Status: **GITHUB LINUX RENDERER MATRIX REJECTED; RELEASE GATE REMAINS BLOCKED**
+
+## Scope
+
+This was an isolated renderer probe. It installed no Orkela APK and makes no
+application, audio, or release claim. Its purpose was to identify a stable,
+deterministic software-renderer tuple before rerunning the much more expensive
+exact-APK matrix.
+
+The probe pinned the Android 17 guest fingerprint, Emulator archive, guest
+payload hashes, loader dependency, runner, source revision, and artifact
+identity. Every boot requested 4 KiB pages and preserved the stock Android
+guest, SELinux enforcing mode, luma sampling, DMA features, and compositor.
 
 ## Failure mechanism
 
-The generic `-gpu software` selection chose a mixed host renderer on the
-GitHub Linux runner:
-
-- GLES: `swangle`;
-- Vulkan: `lavapipe`.
-
-SurfaceFlinger then aborted in `RegionSamplingThread` approximately every
-30–31 seconds:
+On this exact Linux-hosted Emulator pair, SurfaceFlinger repeatedly aborted in
+`RegionSamplingThread`:
 
 ```text
 GoldfishMapper::readFromHost
 Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma
 ```
 
-Every compositor restart also restarted dependent Android services. The
-package and mount Binder services temporarily disappeared and `emulated;0`
-cycled from `mounted` through `checking`. Extending boot or service timeouts
-could therefore never make this configuration stable.
+Every compositor restart also restarted dependent Android services. Package,
+mount, and storage state therefore became transiently unhealthy. Extending
+boot or service timeouts cannot make this pair conformant.
 
-Disabling the visible `GLDMA` and `GLDMA2` host feature flags was rejected as a
-fix. The resulting Emulator log reported those flags as disabled, but the
-guest mapper still observed the readback capability and crashed. This proved
-that feature-log state was not an adequate conformance claim.
+Disabling visible DMA feature flags was previously rejected as a correction:
+the guest mapper still observed the readback capability and crashed. No guest
+property, root command, SurfaceFlinger restart, luma-sampling change, SELinux
+change, or feature override is accepted by the gate.
 
-## Selected correction
+## Exact GitHub results
 
-Android 17 gates now request the official unified software renderer:
+Each matrix cell ran a 120-second soak with 24 service/PID observations and
+four requested screenshots. A screenshot counted only after complete PNG
+chunk-bound, CRC, IHDR, IDAT, IEND, decoded-dimension, pixel-diversity, and
+luminance validation.
 
-```text
--gpu swiftshader
-```
+| Requested backend | Effective tuple | Healthy observations | PID changes | Crash signatures | Valid PNGs | Result |
+|---|---|---:|---:|---:|---:|---|
+| `swiftshader` | `swiftshader / swiftshader` | 7/24 | 22 | 74 | 0/4 | exact control crash |
+| `lavapipe` | `swangle / lavapipe` | 0/24 | 22 | 144 | 0/4 | rejected |
+| `swangle` | `swangle / swiftshader` | 0/24 | initial PID unavailable | 125 | 0/4 | rejected |
+| `host` | `host / host` | 0/24 | n/a | n/a | 0/4 | diagnostic boot timeout |
 
-No Android guest property, root command, SurfaceFlinger restart, luma-sampling
-setting, SELinux mode, or Emulator feature flag is changed. The gate requires
-the effective Emulator log to prove SwiftShader was selected for both GLES and
-Vulkan.
+The reducer correctly failed because the expected SwiftShader control failure
+was reproduced but no deterministic candidate survived.
 
-This follows Android's current documented software-renderer modes and keeps the
-problematic RegionSampling/readback path enabled:
+## Local contrast
+
+The same Android 17 guest had previously completed 4 KiB and 16 KiB causal
+soaks on a Windows host using pure SwiftShader, with invariant SurfaceFlinger,
+zero target crash signatures, and four valid screenshots per runtime. Those
+measurements remain useful host-specific evidence, but they do not override
+the pinned GitHub Ubuntu failure.
+
+SwiftShader is therefore no longer described as the selected GitHub
+correction. It was a valid local hypothesis that the Linux evidence rejected
+for Emulator `36.6.11.0`.
+
+## Next evidence gate
+
+The next bounded experiment keeps the exact Android 17 guest and repeats the
+control while varying only the official Emulator host package:
+
+- `36.6.11.0` SwiftShader: required failing control;
+- `37.1.10` with SwiftShader, swangle, and lavapipe;
+- `37.2.1` with SwiftShader, swangle, and lavapipe.
+
+Every archive is verified against Google's published SHA-1 and an independently
+recorded SHA-256 and byte size before extraction. Every cell has a unique
+identity, and a known failure is keyed by guest hash set, archive identity,
+binary version, and effective renderer tuple. A newer package therefore remains
+eligible even if it reports the same human-readable tuple.
+
+| Revision | Channel at test date | Build | Official SHA-1 | Independent SHA-256 | Bytes |
+|---|---|---:|---|---|---:|
+| 36.6.11 | stable | 15507667 | `f8d8b83cf21a04966326eb1378bacda255f63b93` | `1eade4cf2df6ea8eeead4902c635897ba12aaa32aac4389eaae0fdb498a5b830` | 331,232,577 |
+| 37.1.10 | beta | 15888535 | `489e57e560e310f9dfadf098951a713bf5651cd2` | `5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317` | 334,377,561 |
+| 37.2.1 | canary | 15875889 | `1c39ceb4bca042b973344d252a051189d367ab83` | `3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d` | 346,539,649 |
+
+A newer package is only a stage-one candidate if the complete
+exact-environment soak succeeds. The reducer emits the complete candidate list
+and one deterministic promotion identity. That exact archive and effective
+tuple, not `sdkmanager`'s latest Emulator, must then pass three cold 4 KiB and
+three cold 16 KiB boots with the same exact Orkela and instrumentation APK pair.
+
+This follows Android's documented renderer controls and emulator archive:
 
 - [Configure graphics acceleration](https://developer.android.com/studio/run/emulator-acceleration#command-gpu)
 - [Android Emulator graphics troubleshooting](https://developer.android.com/studio/run/emulator-troubleshooting#graphics-issues)
-- [AOSP host graphics feature mapping](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android/android-emu/android/opengles.cpp)
-
-## Strengthened gate
-
-After the system first becomes ready, every API 37 run must pass:
-
-1. exact image fingerprint, build ID, API, SELinux, and page-size checks;
-2. exact SwiftShader request/effective-renderer log checks;
-3. stock/default enabled luma sampling;
-4. zero pre-existing target crash signatures;
-5. at least 120 measured seconds of compositor soak;
-6. 24 healthy observations of package, SurfaceFlinger, mount, and storage
-   state;
-7. one invariant SurfaceFlinger PID;
-8. four screenshots spread across the soak;
-9. complete PNG chunk bounds, CRC, IHDR, IDAT, terminal IEND, and no-tail
-   validation;
-10. decoded RGB/RGBA pixel diversity and luminance-span validation;
-11. zero target crash signatures after the soak and after the application
-    decode/UI/AudioTrack gate.
-
-The player gate still makes no audibility claim for a virtual audio device.
-
-## Local causal results
-
-Both tests used a cold boot and pure SwiftShader. The physical Android device
-was not addressed and remained screen-off.
-
-| Runtime | Kernel page size | SurfaceFlinger | Target crash hits | PNGs | Sampled RGB classes | Luma span |
-|---|---:|---|---:|---:|---:|---:|
-| Android 17 4 KiB | 4,096 | PID `500`, invariant | 0 | 4/4 | 856–1,011 | 225–245 |
-| Android 17 16 KiB | 16,384 | PID `497`, invariant | 0 | 4/4 | 875–1,010 | 235–245 |
-
-All package/SurfaceFlinger/mount checks remained found and both `private` and
-`emulated;0` volumes remained mounted throughout both local soaks.
+- [Android Emulator archive](https://developer.android.com/studio/emulator_archive)
 
 ## Publication boundary
 
-These local Windows-hosted causal tests validate the renderer hypothesis but
-do not replace the pinned GitHub Ubuntu runner. Release promotion remains
-blocked until the exact APK pair passes the full API 26, API 37/4-KiB, and API
-37/16-KiB workflow from one immutable source revision.
+Orkela `0.3.0-alpha.6` remains blocked until the same immutable APK pair passes
+API 26, Android 17/4-KiB, and Android 17/16-KiB runtime gates. Neither the local
+Windows result nor an isolated renderer candidate is sufficient for release
+promotion.
