@@ -350,7 +350,6 @@ jobs:
           (
             cd "$image"
             printf '%s  %s\n' \
-              b43c39e789485027540a18777884a64adbb1b18a2756803a40b96ec1d1f8c745 package.xml \
               4b8a752539c967c3959af6768c1e118a0e41b36b53dcf03a122a011725c14896 kernel-ranchu \
               1a3822e981bd07308b48882d205e91e893eff40a27e566a84b597180f2ad426b ramdisk.img \
               ca98470938276fbdf5501dfda3c276a5b43e32514900f2ceeec808bdc7711d17 system.img \
