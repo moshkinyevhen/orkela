@@ -426,20 +426,36 @@ jobs:
                 | .identifier
               '
           )"
-          device_type="$(
+          test -n "$runtime"
+          udid=""
+          while IFS= read -r device_type; do
+            candidate="$(
+              xcrun simctl create \
+                "Orkela-CI-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                "$device_type" \
+                "$runtime" \
+                2>/dev/null \
+                || true
+            )"
+            if [[ -n "$candidate" ]]; then
+              udid="$candidate"
+              break
+            fi
+          done < <(
             xcrun simctl list devicetypes -j \
               | jq -r '
                 [
                   .devicetypes[]
                   | select(.name | startswith("iPhone"))
                 ]
-                | last
+                | reverse[]
                 | .identifier
               '
-          )"
-          test -n "$runtime"
-          test -n "$device_type"
-          udid="$(xcrun simctl create Orkela-CI "$device_type" "$runtime")"
+          )
+          if [[ -z "$udid" ]]; then
+            echo "No installed iPhone device type supports runtime $runtime" >&2
+            exit 1
+          fi
           printf '%s\n' "$udid" > "$evidence/simulator-udid.txt"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b

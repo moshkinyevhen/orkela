@@ -65,6 +65,8 @@ trap cleanup EXIT
   "emulator" \
   "platform-tools" \
   "$system_image"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+command -v adb
 echo "no" | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
   create avd \
   --force \
