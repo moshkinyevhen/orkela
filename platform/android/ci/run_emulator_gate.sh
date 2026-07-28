@@ -97,6 +97,7 @@ adb start-server
   -accel on \
   -cores 2 \
   -memory 4096 \
+  -partition-size 4096 \
   -gpu software \
   -port "$emulator_console_port" \
   -verbose \
@@ -178,6 +179,7 @@ test -n "$actual_page_kib"
 actual_page_size="$((actual_page_kib * 1024))"
 test "$actual_page_size" -eq "$expected_page_size"
 adb shell getprop > "$evidence/DEVICE-PROPERTIES.txt"
+adb shell df -k > "$evidence/DEVICE-STORAGE.txt"
 
 adb install --no-streaming -r "$app"
 adb install --no-streaming -r "$test_apk"
