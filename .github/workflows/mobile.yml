@@ -2,12 +2,18 @@ name: Mobile Applications
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
 permissions:
   actions: read
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   ANDROID_NDK_VERSION: 29.0.14206865
