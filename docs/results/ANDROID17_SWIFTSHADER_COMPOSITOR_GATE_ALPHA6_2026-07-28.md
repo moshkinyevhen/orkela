@@ -4,10 +4,14 @@ Date: 2026-07-28
 
 Candidate: `0.3.0-alpha.6`
 
-Source: `68580b576a44cadbff0e29d95b91294098dc3cec`
+Initial source: `68580b576a44cadbff0e29d95b91294098dc3cec`
 
-GitHub Actions run:
+Archive-matrix source: `1e8d164f5b2231fb5c10d36bfb0f48f4775a698a`
+
+GitHub Actions runs:
 [`30360265886`](https://github.com/moshkinyevhen/orkela/actions/runs/30360265886)
+and
+[`30363213810`](https://github.com/moshkinyevhen/orkela/actions/runs/30363213810)
 
 System image: Android 17 build `CE2A.260420.019`, 4 KiB x86-64
 
@@ -75,10 +79,10 @@ SwiftShader is therefore no longer described as the selected GitHub
 correction. It was a valid local hypothesis that the Linux evidence rejected
 for Emulator `36.6.11.0`.
 
-## Next evidence gate
+## Adjacent official Emulator archive gate
 
-The next bounded experiment keeps the exact Android 17 guest and repeats the
-control while varying only the official Emulator host package:
+The completed second experiment kept the exact Android 17 guest and repeated
+the control while varying only the official Emulator host package:
 
 - `36.6.11.0` SwiftShader: required failing control;
 - `37.1.10` with SwiftShader, swangle, and lavapipe;
@@ -96,11 +100,38 @@ eligible even if it reports the same human-readable tuple.
 | 37.1.10 | beta | 15888535 | `489e57e560e310f9dfadf098951a713bf5651cd2` | `5ca4e61b25e4fe94224ef7af745e1c5d6901c2e957ccfb30b5f7fed3fad0e317` | 334,377,561 |
 | 37.2.1 | canary | 15875889 | `1c39ceb4bca042b973344d252a051189d367ab83` | `3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d` | 346,539,649 |
 
-A newer package is only a stage-one candidate if the complete
-exact-environment soak succeeds. The reducer emits the complete candidate list
-and one deterministic promotion identity. That exact archive and effective
-tuple, not `sdkmanager`'s latest Emulator, must then pass three cold 4 KiB and
-three cold 16 KiB boots with the same exact Orkela and instrumentation APK pair.
+A newer package was eligible only if its complete exact-environment soak
+succeeded. The independent reducer confirmed the failing control and emitted
+an empty `stage1_candidates` list. It emitted no promotion identity.
+
+| Emulator | Requested backend | Effective tuple | Healthy observations | PID changes | Crash signatures | Valid PNGs | Result |
+|---|---|---|---:|---:|---:|---:|---|
+| 36.6.11 | SwiftShader | SwiftShader / SwiftShader | 9/24 | 23 | 68 | 0/4 | required control failure reproduced |
+| 37.1.10 | SwiftShader | SwiftShader / SwiftShader | 9/24 | 22 | 62 | 0/4 | rejected |
+| 37.1.10 | swangle | swangle / SwiftShader | 2/24 | 24 | 187 | 0/4 | rejected |
+| 37.1.10 | lavapipe | swangle / lavapipe | 1/24 | 24 | 157 | 0/4 | rejected |
+| 37.2.1 | SwiftShader | SwiftShader / SwiftShader | 8/24 | 21 | 63 | 0/4 | rejected |
+| 37.2.1 | swangle | swangle / SwiftShader | 1/24 | initial PID unavailable | 170 | 0/4 | rejected |
+| 37.2.1 | lavapipe | swangle / lavapipe | 2/24 | initial PID unavailable | 124 | 0/4 | rejected |
+
+All seven cells verified the requested archive, observed Emulator version,
+Android guest payload hash set, guest fingerprint, 4 KiB page size, SELinux
+enforcing state, default luma sampling, and positive display dimensions. Every
+candidate then failed the same promotion requirements: one invariant
+SurfaceFlinger lifetime, 24 healthy observations, zero matching compositor
+crashes, and four valid screenshots.
+
+This rejects the hypothesis that merely moving from stable Emulator 36.6.11 to
+the adjacent 37.1.10 beta or 37.2.1 canary archive corrects the Linux-hosted
+Android 17 compositor path. The failed assessment job is intentional
+fail-closed behavior, not an infrastructure success falsely marked as a
+release pass.
+
+The next experiment must change one independently justified host-side
+mechanism or runner family while preserving the exact stock Android 17 guest.
+It must remain an isolated compositor probe until a stage-one candidate exists.
+Only then may that exact identity advance to three cold 4 KiB and three cold
+16 KiB boots with the same Orkela and instrumentation APK pair.
 
 This follows Android's documented renderer controls and emulator archive:
 

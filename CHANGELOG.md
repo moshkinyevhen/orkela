@@ -121,8 +121,11 @@ Local public-pin evidence:
   stock guest and requires a 120-second compositor soak, one SurfaceFlinger
   lifetime, 24 healthy service/storage observations, zero matching crash
   signatures, and four decoded, CRC-valid non-uniform screenshots before any
-  backend can become a candidate. Release promotion remains blocked while
-  adjacent official Emulator packages are tested.
+  backend can become a candidate. A second exact seven-cell GitHub gate
+  reproduced the failure on the 36.6.11 control and rejected every
+  SwiftShader, swangle/SwiftShader, and swangle/lavapipe cell on official
+  Emulator 37.1.10 and 37.2.1 archives. Release promotion remains blocked; the
+  reducer emitted no stage-one candidate or promotion identity.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.
