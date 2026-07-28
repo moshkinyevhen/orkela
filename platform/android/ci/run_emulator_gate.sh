@@ -12,16 +12,19 @@ case "$gate" in
     runtime_api=26
     expected_page_size=4096
     system_image="system-images;android-26;google_apis;x86_64"
+    emulator_console_port=5554
     ;;
   37)
     runtime_api=37
     expected_page_size=4096
     system_image="system-images;android-37.0;google_apis;x86_64"
+    emulator_console_port=5556
     ;;
   37-16k)
     runtime_api=37
     expected_page_size=16384
     system_image="system-images;android-37.0;google_apis_ps16k;x86_64"
+    emulator_console_port=5558
     ;;
   *)
     echo "Unsupported runtime gate: $gate" >&2
@@ -36,6 +39,7 @@ evidence="$evidence_root/runtime-api${gate}"
 avd_name="orkela-api${gate}"
 expected_pcm="${EXPECTED_PCM_SHA256:?EXPECTED_PCM_SHA256 is required}"
 emulator_pid=""
+device_serial="emulator-$emulator_console_port"
 app_sha256="$(sha256sum "$app" | cut -d' ' -f1)"
 test_apk_sha256="$(sha256sum "$test_apk" | cut -d' ' -f1)"
 export ANDROID_USER_HOME="${ANDROID_USER_HOME:-${RUNNER_TEMP:-/tmp}/orkela-android-user}"
@@ -47,9 +51,11 @@ test -s "$test_apk"
 
 cleanup() {
   set +e
-  adb emu kill >/dev/null 2>&1
+  timeout --signal=TERM --kill-after=5s 15s \
+    adb -s "$device_serial" emu kill >/dev/null 2>&1
   if [[ -n "$emulator_pid" ]]; then
-    if ! timeout 15 tail --pid="$emulator_pid" -f /dev/null; then
+    if ! timeout --signal=TERM --kill-after=5s 15s \
+        tail --pid="$emulator_pid" -f /dev/null; then
       kill "$emulator_pid" >/dev/null 2>&1
       sleep 1
       kill -9 "$emulator_pid" >/dev/null 2>&1
@@ -79,24 +85,79 @@ printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
 "$ANDROID_HOME/emulator/emulator" -list-avds \
   | grep -Fx "$avd_name" > /dev/null
 
+# Start the ADB server before the emulator so its console/ADB port pair is
+# allocated while ADB is already listening. Android Emulator documents this
+# ordering as material to device discovery for some port assignments.
+adb start-server
 "$ANDROID_HOME/emulator/emulator" "@$avd_name" \
   -no-window \
   -no-boot-anim \
   -no-snapshot \
-  -gpu swiftshader_indirect \
+  -no-audio \
+  -accel on \
+  -cores 2 \
+  -memory 4096 \
+  -gpu software \
+  -port "$emulator_console_port" \
+  -verbose \
   > "$evidence/logs/emulator.log" 2>&1 &
 emulator_pid="$!"
 
-timeout 60 adb wait-for-device
-ready=0
-for _ in $(seq 1 150); do
-  if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
-    ready=1
-    break
+# `adb wait-for-device` can remain blocked after GNU timeout sends TERM. Poll
+# instead so a broken image or ADB bridge always fails within a known bound and
+# leaves diagnostics rather than consuming most of the workflow timeout. Each
+# gate owns a distinct even console port and therefore a distinct ADB serial.
+# This prevents a stale earlier runtime from satisfying a later gate.
+device_seen=0
+device_deadline=$((SECONDS + 345))
+while ((SECONDS < device_deadline)); do
+  if timeout --signal=TERM --kill-after=5s 10s \
+      adb devices -l > "$evidence/logs/adb-devices.txt"; then
+    if awk \
+        -v expected="$device_serial" \
+        '$1 == expected && $2 == "device" { found = 1 }
+         END { exit !found }' \
+        "$evidence/logs/adb-devices.txt"; then
+      device_seen=1
+      break
+    fi
+  fi
+  if ! kill -0 "$emulator_pid" 2>/dev/null; then
+    echo "Android Emulator exited before becoming visible to ADB" >&2
+    exit 1
   fi
   sleep 2
 done
-test "$ready" -eq 1
+if [[ "$device_seen" -ne 1 ]]; then
+  echo "Android Emulator did not become visible to ADB within 360 seconds" >&2
+  exit 1
+fi
+export ANDROID_SERIAL="$device_serial"
+
+ready=0
+boot_deadline=$((SECONDS + 285))
+while ((SECONDS < boot_deadline)); do
+  boot_completed="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell getprop sys.boot_completed \
+      2>/dev/null \
+      | tr -d '\r' \
+      || true
+  )"
+  if [[ "$boot_completed" == "1" ]]; then
+    ready=1
+    break
+  fi
+  if ! kill -0 "$emulator_pid" 2>/dev/null; then
+    echo "Android Emulator exited before completing boot" >&2
+    exit 1
+  fi
+  sleep 2
+done
+if [[ "$ready" -ne 1 ]]; then
+  echo "Android Emulator did not complete boot within 300 seconds" >&2
+  exit 1
+fi
 adb shell getprop ro.build.version.sdk | tr -d '\r' | grep -Fxq "$runtime_api"
 # Android 8 / API 26 does not ship the `getconf` shell utility. Read the
 # kernel-reported mapping page size instead; unlike a build property, this
