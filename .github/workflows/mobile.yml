@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      vulkan_backend_probe:
+        description: Run only the Android 17 explicit Vulkan backend probe
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -46,6 +51,7 @@ jobs:
         inputs.renderer_probe != true
         && inputs.emulator_probe != true
         && inputs.vulkan_swapchain_probe != true
+        && inputs.vulkan_backend_probe != true
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 110
@@ -883,6 +889,95 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  android-vulkan-backend-probe:
+    name: Android 17 explicit Vulkan backend diagnostic
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && inputs.vulkan_backend_probe == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Validate diagnostic syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n platform/android/ci/prepare_emulator_probe.sh
+          bash -n platform/android/ci/probe_renderer.sh
+          python3 -m py_compile \
+            platform/android/ci/reduce_emulator_probe.py \
+            platform/android/ci/assess_vulkan_backend_probe.py
+
+      - name: Install exact Android 17 guest and Emulator 37.2.1
+        shell: bash
+        run: |
+          bash platform/android/ci/prepare_emulator_probe.sh \
+            37.2.1 \
+            15875889 \
+            1c39ceb4bca042b973344d252a051189d367ab83 \
+            3fb1f765795b284f864b9b3403d1c5e1ad0f317eb6522441460001ff660d3d7d \
+            346539649 \
+            37.2.1.0
+
+      - name: Probe explicit Vulkan composition backend
+        shell: bash
+        run: |
+          bash platform/android/ci/probe_renderer.sh \
+            swiftshader \
+            diagnostic-37_2_1-swiftshader-vulkan-vns \
+            vulkan-native-swapchain-with-vulkan \
+            startup
+
+      - name: Assess exact startup evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 platform/android/ci/assess_vulkan_backend_probe.py \
+            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns/PROBE-RESULT.json \
+            ANDROID17-VULKAN-BACKEND-ASSESSMENT.json
+
+      - name: Summarize exact backend result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          assessment="ANDROID17-VULKAN-BACKEND-ASSESSMENT.json"
+          if [[ -s "$assessment" ]]; then
+            {
+              echo "## Android 17 explicit Vulkan backend diagnostic"
+              echo "- Status: $(jq -r .status "$assessment")"
+              echo "- Disposition: $(jq -r .disposition "$assessment")"
+              echo "- Promotion eligible: $(jq -r .promotion_eligible "$assessment")"
+              echo "- Reached ADB: $(jq -r .backend_markers.adb_reached "$assessment")"
+              echo "- VkEmulation initialized: $(jq -r .backend_markers.vulkan_initialization "$assessment")"
+              echo "- CompositorVk selected: $(jq -r .backend_markers.compositor_vk_selected "$assessment")"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No provenance-valid backend assessment was produced." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload diagnostic evidence and assessment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orkela-Android17-vulkan-backend-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/android37-renderer-probe/diagnostic-37_2_1-swiftshader-vulkan-vns
+            ANDROID17-VULKAN-BACKEND-ASSESSMENT.json
+          if-no-files-found: error
+          retention-days: 14
+
   ios:
     name: iOS ${{ matrix.target }}
     if: >-
@@ -891,6 +986,7 @@ jobs:
         inputs.renderer_probe != true
         && inputs.emulator_probe != true
         && inputs.vulkan_swapchain_probe != true
+        && inputs.vulkan_backend_probe != true
       )
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
@@ -1212,6 +1308,7 @@ jobs:
           inputs.renderer_probe != true
           && inputs.emulator_probe != true
           && inputs.vulkan_swapchain_probe != true
+          && inputs.vulkan_backend_probe != true
         )
       )
     needs:

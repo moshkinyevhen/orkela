@@ -21,9 +21,15 @@ fi
 feature_profile="${3:-default}"
 case "$feature_profile" in
   default)
+    requested_vulkan=0
     requested_vulkan_native_swapchain=0
     ;;
   vulkan-native-swapchain)
+    requested_vulkan=0
+    requested_vulkan_native_swapchain=1
+    ;;
+  vulkan-native-swapchain-with-vulkan)
+    requested_vulkan=1
     requested_vulkan_native_swapchain=1
     ;;
   *)
@@ -31,6 +37,18 @@ case "$feature_profile" in
     exit 2
     ;;
 esac
+probe_scope="${4:-soak}"
+case "$probe_scope" in
+  soak|startup) ;;
+  *)
+    echo "Unsupported probe scope: $probe_scope" >&2
+    exit 2
+    ;;
+esac
+requested_soak_seconds=120
+if [[ "$probe_scope" == "startup" ]]; then
+  requested_soak_seconds=0
+fi
 
 system_image="system-images;android-37.0;google_apis;x86_64"
 expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
@@ -74,8 +92,25 @@ observed_luma=""
 observed_page_size=""
 effective_renderer_line=""
 effective_feature_count=0
+effective_vulkan_count=0
+effective_vulkan=""
 effective_vulkan_native_swapchain=""
 feature_exact=false
+process_started=false
+process_alive_after_probe=false
+process_exit_code=""
+startup_failure_class="none"
+startup_evidence_count=0
+startup_evidence_sha256=""
+vulkan_initialization_count=0
+vulkan_composition_enabled_count=0
+vulkan_composition_state_count=0
+vulkan_native_swapchain_enabled_count=0
+vulkan_native_swapchain_state_count=0
+guest_vulkan_only_enabled_count=0
+guest_vulkan_only_state_count=0
+compositor_vk_count=0
+host_compositor_error_count=0
 known_failing_tuple=false
 known_failure_identity=false
 stage1_candidate=false
@@ -197,6 +232,9 @@ emulator_args=(
 )
 if [[ "$feature_profile" == "vulkan-native-swapchain" ]]; then
   emulator_args+=(-feature VulkanNativeSwapchain)
+elif [[ "$feature_profile" == \
+    "vulkan-native-swapchain-with-vulkan" ]]; then
+  emulator_args+=(-feature Vulkan,VulkanNativeSwapchain)
 fi
 printf '%q ' "$emulator_bin" "${emulator_args[@]}" \
   > "$evidence/EMULATOR-COMMAND.txt"
@@ -204,6 +242,7 @@ printf '\n' >> "$evidence/EMULATOR-COMMAND.txt"
 "$emulator_bin" "${emulator_args[@]}" \
   > "$evidence/logs/emulator.log" 2>&1 &
 emulator_pid="$!"
+process_started=true
 
 device_seen=false
 device_deadline=$((SECONDS + 345))
@@ -356,14 +395,15 @@ if [[ "$boot_completed" == "true" ]]; then
     environment_exact=true
   fi
 
-  if timeout --signal=TERM --kill-after=3s 15s \
+  if [[ "$probe_scope" == "soak" ]]; then
+    if timeout --signal=TERM --kill-after=3s 15s \
       adb -s "$device_serial" logcat -b all -d -v threadtime \
       > "$evidence/logs/logcat-pre-soak.txt" 2>&1; then
-    pre_soak_log_ok=true
-  else
-    record_failure "pre-soak-logcat-capture"
-  fi
-  initial_surfaceflinger_pid="$(
+      pre_soak_log_ok=true
+    else
+      record_failure "pre-soak-logcat-capture"
+    fi
+    initial_surfaceflinger_pid="$(
     timeout --signal=TERM --kill-after=3s 10s \
       adb -s "$device_serial" shell pidof surfaceflinger \
       2>/dev/null | tr -d '\r' || true
@@ -535,8 +575,9 @@ if [[ "$boot_completed" == "true" ]]; then
       || "$pid_changes" -ne 0 ]]; then
     record_failure "surfaceflinger-pid-instability"
   fi
-  if [[ "$crash_signatures" -ne 0 ]]; then
-    record_failure "surfaceflinger-crash-signatures:$crash_signatures"
+    if [[ "$crash_signatures" -ne 0 ]]; then
+      record_failure "surfaceflinger-crash-signatures:$crash_signatures"
+    fi
   fi
 fi
 
@@ -559,11 +600,22 @@ if [[ "$effective_renderer_count" -ne 1 ]]; then
   record_failure "effective-renderer-tuple-count:$effective_renderer_count"
 fi
 grep -E \
-  'gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=[[:space:]]*[01][[:space:]]*$' \
+  'gfxstreamFeature:(Vulkan|VulkanNativeSwapchain)[[:space:]]*=[[:space:]]*[01][[:space:]]*$' \
   "$evidence/logs/emulator.log" \
   > "$evidence/HOST-FEATURE-STATE.txt" || true
 effective_feature_count="$(
-  awk 'NF { count += 1 } END { print count + 0 }' \
+  grep -Ec \
+    'gfxstreamFeature:VulkanNativeSwapchain[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt" || true
+)"
+effective_vulkan_count="$(
+  grep -Ec \
+    'gfxstreamFeature:Vulkan[[:space:]]*=' \
+    "$evidence/HOST-FEATURE-STATE.txt"
+)"
+effective_vulkan="$(
+  sed -n \
+    's/^.*gfxstreamFeature:Vulkan[[:space:]]*=[[:space:]]*\([01]\)[[:space:]]*$/\1/p' \
     "$evidence/HOST-FEATURE-STATE.txt"
 )"
 effective_vulkan_native_swapchain="$(
@@ -578,8 +630,84 @@ elif [[ "$effective_vulkan_native_swapchain" \
     != "$requested_vulkan_native_swapchain" ]]; then
   record_failure \
     "vulkan-native-swapchain-state:$effective_vulkan_native_swapchain:expected:$requested_vulkan_native_swapchain"
+elif [[ "$effective_vulkan_count" -ne 1 ]]; then
+  record_failure "vulkan-state-count:$effective_vulkan_count"
+elif [[ "$effective_vulkan" != "$requested_vulkan" ]]; then
+  record_failure \
+    "vulkan-state:$effective_vulkan:expected:$requested_vulkan"
 else
   feature_exact=true
+fi
+
+# Preserve a deterministic account of failures that happen before ADB. These
+# cells are valid negative evidence only when both the process state and the
+# normalized host failure signature are present.
+startup_evidence_file="$evidence/STARTUP-FAILURE-EVIDENCE.txt"
+grep -E \
+  'gfxstreamFeature:(Vulkan|VulkanNativeSwapchain|GuestVulkanOnly)[[:space:]]*=|Initializing VkEmulation features|useVulkanComposition:[[:space:]]*(true|false)|useVulkanNativeSwapchain:[[:space:]]*(true|false)|Performing composition using CompositorVk|Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer' \
+  "$evidence/logs/emulator.log" \
+  | sed -E 's/^[^|]*\|[[:space:]]*//' \
+  > "$startup_evidence_file" || true
+startup_evidence_count="$(
+  awk 'NF { count += 1 } END { print count + 0 }' "$startup_evidence_file"
+)"
+startup_evidence_sha256="$(
+  sha256sum "$startup_evidence_file" | awk '{print $1}'
+)"
+vulkan_initialization_count="$(
+  grep -Fc 'Initializing VkEmulation features' \
+    "$startup_evidence_file" || true
+)"
+vulkan_composition_enabled_count="$(
+  grep -Ec 'useVulkanComposition:[[:space:]]*true' \
+    "$startup_evidence_file" || true
+)"
+vulkan_composition_state_count="$(
+  grep -Ec 'useVulkanComposition:[[:space:]]*(true|false)' \
+    "$startup_evidence_file" || true
+)"
+vulkan_native_swapchain_enabled_count="$(
+  grep -Ec 'useVulkanNativeSwapchain:[[:space:]]*true' \
+    "$startup_evidence_file" || true
+)"
+vulkan_native_swapchain_state_count="$(
+  grep -Ec 'useVulkanNativeSwapchain:[[:space:]]*(true|false)' \
+    "$startup_evidence_file" || true
+)"
+guest_vulkan_only_enabled_count="$(
+  grep -Ec \
+    'gfxstreamFeature:GuestVulkanOnly[[:space:]]*=[[:space:]]*1' \
+    "$startup_evidence_file" || true
+)"
+guest_vulkan_only_state_count="$(
+  grep -Ec \
+    'gfxstreamFeature:GuestVulkanOnly[[:space:]]*=[[:space:]]*[01]' \
+    "$startup_evidence_file" || true
+)"
+compositor_vk_count="$(
+  grep -Fc 'Performing composition using CompositorVk' \
+    "$startup_evidence_file" || true
+)"
+host_compositor_error_count="$(
+  grep -Ec \
+    'Failed to initialize the compositor|Failed to initialize FrameBuffer|Could not start renderer' \
+    "$startup_evidence_file" || true
+)"
+if [[ "$host_compositor_error_count" -ge 3 \
+    && "$boot_completed" == "false" ]]; then
+  startup_failure_class="host-compositor-init-error"
+elif grep -Fq "emulator-exited-before-adb" "$failure_file"; then
+  startup_failure_class="emulator-exited-before-adb"
+elif grep -Fq "adb-device-timeout" "$failure_file"; then
+  startup_failure_class="adb-device-timeout"
+fi
+if kill -0 "$emulator_pid" 2>/dev/null; then
+  process_alive_after_probe=true
+else
+  set +e
+  wait "$emulator_pid"
+  process_exit_code="$?"
+  set -u -o pipefail
 fi
 # A known failure is scoped by the full causal environment. A newer Emulator
 # remains eligible even when it reports the same human-readable renderer tuple.
@@ -640,11 +768,31 @@ fi
 
 CELL_ID="$cell_id" \
 RENDERER="$renderer" \
+PROBE_SCOPE="$probe_scope" \
+REQUESTED_SOAK_SECONDS="$requested_soak_seconds" \
 FEATURE_PROFILE="$feature_profile" \
+REQUESTED_VULKAN="$requested_vulkan" \
 REQUESTED_VULKAN_NATIVE_SWAPCHAIN="$requested_vulkan_native_swapchain" \
+EFFECTIVE_VULKAN="$effective_vulkan" \
+EFFECTIVE_VULKAN_COUNT="$effective_vulkan_count" \
 EFFECTIVE_VULKAN_NATIVE_SWAPCHAIN="$effective_vulkan_native_swapchain" \
 EFFECTIVE_FEATURE_COUNT="$effective_feature_count" \
 FEATURE_EXACT="$feature_exact" \
+PROCESS_STARTED="$process_started" \
+PROCESS_ALIVE_AFTER_PROBE="$process_alive_after_probe" \
+PROCESS_EXIT_CODE="$process_exit_code" \
+STARTUP_FAILURE_CLASS="$startup_failure_class" \
+STARTUP_EVIDENCE_COUNT="$startup_evidence_count" \
+STARTUP_EVIDENCE_SHA256="$startup_evidence_sha256" \
+VULKAN_INITIALIZATION_COUNT="$vulkan_initialization_count" \
+VULKAN_COMPOSITION_ENABLED_COUNT="$vulkan_composition_enabled_count" \
+VULKAN_COMPOSITION_STATE_COUNT="$vulkan_composition_state_count" \
+VULKAN_NATIVE_SWAPCHAIN_ENABLED_COUNT="$vulkan_native_swapchain_enabled_count" \
+VULKAN_NATIVE_SWAPCHAIN_STATE_COUNT="$vulkan_native_swapchain_state_count" \
+GUEST_VULKAN_ONLY_ENABLED_COUNT="$guest_vulkan_only_enabled_count" \
+GUEST_VULKAN_ONLY_STATE_COUNT="$guest_vulkan_only_state_count" \
+COMPOSITOR_VK_COUNT="$compositor_vk_count" \
+HOST_COMPOSITOR_ERROR_COUNT="$host_compositor_error_count" \
 RUNNER_OS_VALUE="$runner_os" \
 RUNNER_ARCH_VALUE="$runner_arch" \
 IMAGE_OS_VALUE="$image_os" \
@@ -719,10 +867,18 @@ print(json.dumps({
     "purpose": "Android 17 renderer isolation probe; no Orkela APK installed",
     "cell_id": os.environ["CELL_ID"],
     "renderer": os.environ["RENDERER"],
+    "probe_scope": os.environ["PROBE_SCOPE"],
     "effective_renderer_line": os.environ["EFFECTIVE_RENDERER_LINE"],
     "effective_renderer_count": int(os.environ["EFFECTIVE_RENDERER_COUNT"]),
     "host_feature": {
         "profile": os.environ["FEATURE_PROFILE"],
+        "requested_vulkan": int(os.environ["REQUESTED_VULKAN"]),
+        "effective_vulkan": int(
+            os.environ["EFFECTIVE_VULKAN"] or -1
+        ),
+        "effective_vulkan_state_count": int(
+            os.environ["EFFECTIVE_VULKAN_COUNT"]
+        ),
         "requested_vulkan_native_swapchain": int(
             os.environ["REQUESTED_VULKAN_NATIVE_SWAPCHAIN"]
         ),
@@ -733,6 +889,45 @@ print(json.dumps({
             os.environ["EFFECTIVE_FEATURE_COUNT"]
         ),
         "exact": boolean("FEATURE_EXACT"),
+    },
+    "process": {
+        "started": boolean("PROCESS_STARTED"),
+        "alive_after_probe": boolean("PROCESS_ALIVE_AFTER_PROBE"),
+        "exit_code": (
+            int(os.environ["PROCESS_EXIT_CODE"])
+            if os.environ["PROCESS_EXIT_CODE"]
+            else None
+        ),
+    },
+    "startup": {
+        "failure_class": os.environ["STARTUP_FAILURE_CLASS"],
+        "evidence_count": int(os.environ["STARTUP_EVIDENCE_COUNT"]),
+        "evidence_sha256": os.environ["STARTUP_EVIDENCE_SHA256"],
+        "vulkan_initialization_count": int(
+            os.environ["VULKAN_INITIALIZATION_COUNT"]
+        ),
+        "vulkan_composition_enabled_count": int(
+            os.environ["VULKAN_COMPOSITION_ENABLED_COUNT"]
+        ),
+        "vulkan_composition_state_count": int(
+            os.environ["VULKAN_COMPOSITION_STATE_COUNT"]
+        ),
+        "vulkan_native_swapchain_enabled_count": int(
+            os.environ["VULKAN_NATIVE_SWAPCHAIN_ENABLED_COUNT"]
+        ),
+        "vulkan_native_swapchain_state_count": int(
+            os.environ["VULKAN_NATIVE_SWAPCHAIN_STATE_COUNT"]
+        ),
+        "guest_vulkan_only_enabled_count": int(
+            os.environ["GUEST_VULKAN_ONLY_ENABLED_COUNT"]
+        ),
+        "guest_vulkan_only_state_count": int(
+            os.environ["GUEST_VULKAN_ONLY_STATE_COUNT"]
+        ),
+        "compositor_vk_count": int(os.environ["COMPOSITOR_VK_COUNT"]),
+        "host_compositor_error_count": int(
+            os.environ["HOST_COMPOSITOR_ERROR_COUNT"]
+        ),
     },
     "host": {
         "runner_os": os.environ["RUNNER_OS_VALUE"],
@@ -773,13 +968,13 @@ print(json.dumps({
         "expected_fingerprint": os.environ["EXPECTED_FINGERPRINT"],
         "observed_fingerprint": os.environ["OBSERVED_FINGERPRINT"],
         "selinux": os.environ["OBSERVED_SELINUX"],
-        "luma_sampling": os.environ["OBSERVED_LUMA"] or "default",
+        "luma_sampling": os.environ["OBSERVED_LUMA"],
         "page_size": int(os.environ["OBSERVED_PAGE_SIZE"] or 0),
         "display_width": int(os.environ["DISPLAY_WIDTH"]),
         "display_height": int(os.environ["DISPLAY_HEIGHT"]),
     },
     "soak": {
-        "requested_seconds": 120,
+        "requested_seconds": int(os.environ["REQUESTED_SOAK_SECONDS"]),
         "observations": int(os.environ["OBSERVATIONS"]),
         "healthy_observations": int(os.environ["HEALTHY_OBSERVATIONS"]),
         "initial_surfaceflinger_pid": os.environ["INITIAL_SURFACEFLINGER_PID"],

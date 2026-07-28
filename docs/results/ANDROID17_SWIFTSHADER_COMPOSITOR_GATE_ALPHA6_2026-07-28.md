@@ -8,10 +8,14 @@ Initial source: `68580b576a44cadbff0e29d95b91294098dc3cec`
 
 Archive-matrix source: `1e8d164f5b2231fb5c10d36bfb0f48f4775a698a`
 
+Vulkan-composition source: `414b4ed45d5bc0fb3fdb47c882991630dda2ca87`
+
 GitHub Actions runs:
 [`30360265886`](https://github.com/moshkinyevhen/orkela/actions/runs/30360265886)
 and
-[`30363213810`](https://github.com/moshkinyevhen/orkela/actions/runs/30363213810)
+[`30363213810`](https://github.com/moshkinyevhen/orkela/actions/runs/30363213810),
+followed by
+[`30365673867`](https://github.com/moshkinyevhen/orkela/actions/runs/30365673867)
 
 System image: Android 17 build `CE2A.260420.019`, 4 KiB x86-64
 
@@ -168,6 +172,67 @@ Test Devices were also rejected for this gate because no official API 37 ATD
 image exists and ATD is not a screenshot-rendering substitute. A pinned
 `macos-26-intel` pure-SwiftShader probe remains an orthogonal fallback only if
 the Linux Vulkan-composition hypothesis is unsupported or rejected.
+
+## Vulkan-composition result
+
+Run `30365673867` used one source SHA, run/attempt, Ubuntu image
+`ubuntu24/20260720.247.2`, kernel `6.17.0-1020-azure`, x86-64 machine contract,
+and usable KVM across all four hosted VMs.
+
+| Cell | Requested/effective feature | Boot | Compositor evidence | Result |
+|---|---:|---:|---|---|
+| SwiftShader control | 0 / 0 | yes | 67 crash signatures, 26 target signatures, 22 PID changes, 9/24 healthy, 0/4 PNG | exact control failure |
+| SwiftShader | 1 / 1 | no | framebuffer/compositor initialization error `-2` before ADB | rejected |
+| swangle/SwiftShader | 1 / 1 | no | framebuffer/compositor initialization error `-2` before ADB | rejected |
+| swangle/lavapipe | 1 / 1 | no | framebuffer/compositor initialization error `-2` before ADB | rejected |
+
+The command-line feature was therefore supported and became effective in every
+candidate; this was not a silent feature fallback. Each feature-on log
+auto-enabled GuestAngle, selected its allowlisted renderer tuple, attempted the
+X11/Vulkan compositor path, and then reported:
+
+```text
+Failed to initialize the compositor.
+Failed to initialize FrameBuffer().
+Could not start renderer! (Error: -2)
+```
+
+The feature-on route avoids the later guest SurfaceFlinger crash only by
+failing earlier during host framebuffer initialization, so it is not a
+stage-one candidate. The assessment job correctly failed closed. Its first
+reducer version stopped on the absent post-boot fingerprint instead of writing
+a consolidated rejection file; the four per-cell artifacts remain complete
+and authoritative. The corrected reducer now separates host provenance from
+guest runtime conformance. It records a provenance-valid pre-boot failure as
+`REJECTED`, validates the normalized startup-evidence file against its recorded
+SHA-256 and line count, removes any stale promotion file before reduction, and
+never makes a pre-boot cell promotion-eligible.
+
+## Explicit Vulkan backend micro-probe
+
+The previous result is not evidence that an X server is the missing variable.
+Its effective feature tuple was `Vulkan=0`,
+`VulkanNativeSwapchain=1`, and `GuestVulkanOnly=1`; the host never initialized
+VkEmulation or `CompositorVk`. An Xvfb experiment would therefore change a
+downstream display mechanism before proving that the Vulkan composition
+backend exists.
+
+The next and only Linux diagnostic cell preserves the exact 37.2.1 archive,
+SwiftShader renderer, Android 17 guest hashes, GitHub host identity, and
+headless execution, while requesting:
+
+```text
+-feature Vulkan,VulkanNativeSwapchain
+```
+
+This is evidence-only and cannot emit a promotion identity. The Linux route
+may continue only when the log proves effective `Vulkan=1` and
+`VulkanNativeSwapchain=1`, initializes VkEmulation, reports both Vulkan
+composition flags, selects `CompositorVk`, contains no host compositor
+initialization error, and reaches ADB. A feature downgrade, the same
+framebuffer error, or failure to reach ADB rejects this route. Xvfb becomes a
+causal follow-up only if Vulkan initialization succeeds and the remaining
+failure explicitly names an X11/XCB surface or display connection.
 
 This follows Android's documented renderer controls and emulator archive:
 

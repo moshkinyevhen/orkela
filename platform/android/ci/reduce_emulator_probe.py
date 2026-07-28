@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -223,6 +224,82 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def validate_startup_evidence_file(
+    result: dict[str, Any],
+    evidence_path: Path,
+) -> list[str]:
+    cell_id = result["cell_id"]
+    require(
+        evidence_path.is_file(),
+        f"{cell_id}: startup evidence file is missing",
+    )
+    payload = evidence_path.read_bytes()
+    observed_hash = hashlib.sha256(payload).hexdigest()
+    require(
+        observed_hash == result["startup"]["evidence_sha256"],
+        f"{cell_id}: startup evidence hash mismatch",
+    )
+    lines = [
+        line
+        for line in payload.decode("utf-8").splitlines()
+        if line
+    ]
+    require(
+        len(lines) == result["startup"]["evidence_count"],
+        f"{cell_id}: startup evidence count mismatch",
+    )
+    count_patterns = {
+        "vulkan_initialization_count": (
+            r"Initializing VkEmulation features"
+        ),
+        "vulkan_composition_enabled_count": (
+            r"useVulkanComposition:\s*true"
+        ),
+        "vulkan_composition_state_count": (
+            r"useVulkanComposition:\s*(?:true|false)"
+        ),
+        "vulkan_native_swapchain_enabled_count": (
+            r"useVulkanNativeSwapchain:\s*true"
+        ),
+        "vulkan_native_swapchain_state_count": (
+            r"useVulkanNativeSwapchain:\s*(?:true|false)"
+        ),
+        "guest_vulkan_only_enabled_count": (
+            r"gfxstreamFeature:GuestVulkanOnly\s*=\s*1"
+        ),
+        "guest_vulkan_only_state_count": (
+            r"gfxstreamFeature:GuestVulkanOnly\s*=\s*[01]"
+        ),
+        "compositor_vk_count": (
+            r"Performing composition using CompositorVk"
+        ),
+        "host_compositor_error_count": (
+            r"Failed to initialize the compositor"
+            r"|Failed to initialize FrameBuffer"
+            r"|Could not start renderer"
+        ),
+    }
+    for field, pattern in count_patterns.items():
+        observed_count = sum(
+            1 for line in lines if re.search(pattern, line)
+        )
+        require(
+            observed_count == result["startup"][field],
+            f"{cell_id}: {field} does not match startup evidence",
+        )
+    if result["startup"]["failure_class"] == "host-compositor-init-error":
+        for signature in (
+            "Failed to initialize the compositor.",
+            "Failed to initialize FrameBuffer().",
+            "Could not start renderer! (Error: -2)",
+        ):
+            require(
+                any(signature in line for line in lines),
+                f"{cell_id}: required startup signature is missing",
+            )
+    return lines
+
+
 def archive_url(build_id: int) -> str:
     return (
         "https://dl.google.com/android/repository/"
@@ -233,7 +310,7 @@ def archive_url(build_id: int) -> str:
 def validate_result(
     result: dict[str, Any],
     expected_matrix: dict[str, dict[str, Any]] = EXPECTED,
-) -> None:
+) -> str:
     cell_id = result.get("cell_id")
     require(
         cell_id in expected_matrix,
@@ -246,6 +323,11 @@ def validate_result(
     host = result["host"]
 
     require(result["schema"] == 1, f"{cell_id}: schema mismatch")
+    expected_probe_scope = expected.get("probe_scope", "soak")
+    require(
+        result["probe_scope"] == expected_probe_scope,
+        f"{cell_id}: probe scope mismatch",
+    )
     require(
         result["renderer"] == expected["renderer"],
         f"{cell_id}: requested renderer mismatch",
@@ -301,10 +383,6 @@ def validate_result(
         f"{cell_id}: expected fingerprint mismatch",
     )
     require(
-        guest["observed_fingerprint"] == GUEST_FINGERPRINT,
-        f"{cell_id}: observed fingerprint mismatch",
-    )
-    require(
         result["effective_renderer_count"] == 1,
         f"{cell_id}: effective renderer tuple is not singular",
     )
@@ -312,10 +390,6 @@ def validate_result(
         result["effective_renderer_line"]
         == EXPECTED_RENDERER_LINES[expected["renderer"]],
         f"{cell_id}: effective renderer tuple is not allowlisted",
-    )
-    require(
-        result["crash_evidence_complete"],
-        f"{cell_id}: crash evidence is incomplete",
     )
     expected_feature_profile = expected.get("feature_profile", "default")
     expected_feature_state = expected.get("vulkan_native_swapchain", 0)
@@ -327,6 +401,19 @@ def validate_result(
         host_feature["requested_vulkan_native_swapchain"]
         == expected_feature_state,
         f"{cell_id}: requested VulkanNativeSwapchain state mismatch",
+    )
+    expected_vulkan_state = expected.get("vulkan", 0)
+    require(
+        host_feature["requested_vulkan"] == expected_vulkan_state,
+        f"{cell_id}: requested Vulkan state mismatch",
+    )
+    require(
+        host_feature["effective_vulkan_state_count"] == 1,
+        f"{cell_id}: Vulkan state is not singular",
+    )
+    require(
+        host_feature["effective_vulkan"] == expected_vulkan_state,
+        f"{cell_id}: effective Vulkan state mismatch",
     )
     require(
         host_feature["effective_state_count"] == 1,
@@ -385,7 +472,113 @@ def validate_result(
         f"{cell_id}: host machine mismatch",
     )
     require(host["kvm_access"], f"{cell_id}: KVM access is missing")
-    require(result["boot_completed"], f"{cell_id}: boot did not complete")
+    process = result["process"]
+    startup = result["startup"]
+    require(process["started"], f"{cell_id}: emulator process was not started")
+    require(
+        re.fullmatch(r"[0-9a-f]{64}", startup["evidence_sha256"])
+        is not None,
+        f"{cell_id}: invalid startup evidence hash",
+    )
+    if not result["boot_completed"]:
+        require(
+            expected.get("allow_unsupported_feature", False),
+            f"{cell_id}: pre-boot rejection is not allowed for this cell",
+        )
+        require(
+            not result["environment_exact"],
+            f"{cell_id}: pre-boot environment cannot be exact",
+        )
+        require(not result["stable"], f"{cell_id}: pre-boot cell is stable")
+        require(
+            not result["stage1_candidate"],
+            f"{cell_id}: pre-boot cell is promotion eligible",
+        )
+        require(
+            guest["observed_fingerprint"] == "",
+            f"{cell_id}: pre-boot fingerprint must be empty",
+        )
+        require(
+            guest["selinux"] == "",
+            f"{cell_id}: pre-boot SELinux state must be empty",
+        )
+        require(
+            guest["luma_sampling"] == "",
+            f"{cell_id}: pre-boot luma state must be empty",
+        )
+        require(
+            guest["page_size"] == 0,
+            f"{cell_id}: pre-boot page size must be zero",
+        )
+        require(
+            guest["display_width"] == 0 and guest["display_height"] == 0,
+            f"{cell_id}: pre-boot display dimensions must be zero",
+        )
+        require(
+            result["soak"]["observations"] == 0
+            and result["soak"]["healthy_observations"] == 0
+            and result["soak"]["valid_screenshots"] == 0,
+            f"{cell_id}: pre-boot runtime evidence must be empty",
+        )
+        require(
+            result["soak"]["requested_seconds"]
+            == (0 if expected_probe_scope == "startup" else 120),
+            f"{cell_id}: pre-boot requested duration mismatch",
+        )
+        require(
+            result["soak"]["initial_surfaceflinger_pid"] == ""
+            and result["soak"]["final_surfaceflinger_pid"] == ""
+            and result["soak"]["pid_changes"] == 0,
+            f"{cell_id}: pre-boot SurfaceFlinger evidence must be empty",
+        )
+        require(
+            startup["failure_class"] == "host-compositor-init-error",
+            f"{cell_id}: pre-boot failure class is not allowlisted",
+        )
+        require(
+            startup["host_compositor_error_count"] >= 3,
+            f"{cell_id}: host compositor failure evidence is incomplete",
+        )
+        require(
+            startup["evidence_count"] >= 5,
+            f"{cell_id}: startup failure evidence is incomplete",
+        )
+        require(
+            (process["alive_after_probe"] and process["exit_code"] is None)
+            or (
+                not process["alive_after_probe"]
+                and isinstance(process["exit_code"], int)
+            ),
+            f"{cell_id}: process termination evidence is contradictory",
+        )
+        require(
+            any(
+                failure in {
+                    "emulator-exited-before-adb",
+                    "adb-device-timeout",
+                }
+                for failure in result["failures"]
+            ),
+            f"{cell_id}: pre-boot transport failure is missing",
+        )
+        require(
+            set(result["failures"]).issubset({
+                "emulator-exited-before-adb",
+                "adb-device-timeout",
+            }),
+            f"{cell_id}: pre-boot failure list is not allowlisted",
+        )
+        require(
+            not result["crash_evidence_complete"]
+            and result["soak"]["crash_signatures"] == 0
+            and result["soak"]["target_crash_signatures"] == 0,
+            f"{cell_id}: pre-boot crash evidence is contradictory",
+        )
+        return "provenance-valid-preboot-rejection"
+    require(
+        guest["observed_fingerprint"] == GUEST_FINGERPRINT,
+        f"{cell_id}: observed fingerprint mismatch",
+    )
     require(
         result["environment_exact"],
         f"{cell_id}: environment is not exact",
@@ -395,7 +588,7 @@ def validate_result(
         f"{cell_id}: SELinux mismatch",
     )
     require(
-        str(guest["luma_sampling"]) in {"default", "1"},
+        str(guest["luma_sampling"]) in {"", "default", "1"},
         f"{cell_id}: luma-sampling mismatch",
     )
     require(guest["page_size"] == 4096, f"{cell_id}: page-size mismatch")
@@ -403,10 +596,50 @@ def validate_result(
         guest["display_width"] > 0 and guest["display_height"] > 0,
         f"{cell_id}: invalid display dimensions",
     )
+    if expected_probe_scope == "startup":
+        require(
+            result["soak"]["requested_seconds"] == 0
+            and result["soak"]["observations"] == 0
+            and result["soak"]["healthy_observations"] == 0,
+            f"{cell_id}: startup probe contains soak evidence",
+        )
+        require(
+            result["soak"]["initial_surfaceflinger_pid"] == ""
+            and result["soak"]["final_surfaceflinger_pid"] == ""
+            and result["soak"]["pid_changes"] == 0
+            and result["soak"]["crash_signatures"] == 0
+            and result["soak"]["target_crash_signatures"] == 0
+            and result["soak"]["valid_screenshots"] == 0,
+            f"{cell_id}: startup probe contains runtime evidence",
+        )
+        require(
+            result["failures"] == [],
+            f"{cell_id}: successful startup probe records failures",
+        )
+        require(
+            startup["failure_class"] == "none",
+            f"{cell_id}: successful startup probe has a failure class",
+        )
+        require(
+            not result["crash_evidence_complete"]
+            and not result["stable"]
+            and not result["stage1_candidate"],
+            f"{cell_id}: startup-only derived state is contradictory",
+        )
+        require(
+            process["alive_after_probe"] and process["exit_code"] is None,
+            f"{cell_id}: startup process was not alive at capture",
+        )
+        return "runtime-conformant-startup"
+    require(
+        result["crash_evidence_complete"],
+        f"{cell_id}: crash evidence is incomplete",
+    )
     require(
         result["soak"]["requested_seconds"] == 120,
         f"{cell_id}: soak duration mismatch",
     )
+    return "runtime-conformant"
 
 
 def main() -> int:
@@ -418,6 +651,8 @@ def main() -> int:
     artifact_root = Path(sys.argv[1])
     assessment_path = Path(sys.argv[2])
     promotion_path = Path(sys.argv[3])
+    assessment_path.unlink(missing_ok=True)
+    promotion_path.unlink(missing_ok=True)
     paths = sorted(artifact_root.glob("**/PROBE-RESULT.json"))
     raw_results = [
         json.loads(path.read_text(encoding="utf-8"))
@@ -442,10 +677,20 @@ def main() -> int:
     expected_matrix = matrix["expected"]
 
     results: dict[str, dict[str, Any]] = {}
+    dispositions: dict[str, str] = {}
+    result_paths = {
+        json.loads(path.read_text(encoding="utf-8")).get("cell_id"): path
+        for path in paths
+    }
     for result in raw_results:
-        validate_result(result, expected_matrix)
+        disposition = validate_result(result, expected_matrix)
         cell_id = result["cell_id"]
+        validate_startup_evidence_file(
+            result,
+            result_paths[cell_id].with_name("STARTUP-FAILURE-EVIDENCE.txt"),
+        )
         results[cell_id] = result
+        dispositions[cell_id] = disposition
     require(set(results) == set(expected_matrix), "exact cell set mismatch")
 
     first_cell = next(iter(expected_matrix))
@@ -539,6 +784,7 @@ def main() -> int:
         "host_identity": host_identity,
         "control_reproduced": control_reproduced,
         "stage1_candidates": candidates,
+        "cell_dispositions": dispositions,
         "results": results,
     }
     assessment_path.write_text(

@@ -131,6 +131,16 @@ Local public-pin evidence:
   the effective host-feature state, allowlisted renderer tuple, target crash
   evidence, GitHub runner image/run/kernel identity, and the unchanged guest
   contract before any result can enter the cold-boot APK gate.
+- The completed Vulkan-composition run reproduced the feature-off control and
+  proved that all three feature-on renderer cells reached effective state
+  `VulkanNativeSwapchain=1`, but each failed host framebuffer/compositor
+  initialization before ADB. No cell was promoted.
+- Provenance-valid pre-boot renderer failures now produce a consolidated
+  `REJECTED` assessment with process state and hash-verified normalized startup
+  evidence; they can never produce or retain a promotion identity. A bounded
+  follow-up diagnostic explicitly enables both `Vulkan` and
+  `VulkanNativeSwapchain` and requires VkEmulation, Vulkan composition,
+  `CompositorVk`, and ADB evidence before the Linux route may continue.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.

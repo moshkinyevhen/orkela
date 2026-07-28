@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+import hashlib
 from pathlib import Path
 
 
@@ -46,14 +47,37 @@ class EmulatorProbeReducerTest(unittest.TestCase):
             "purpose": "test fixture",
             "cell_id": cell_id,
             "renderer": renderer,
+            "probe_scope": expected.get("probe_scope", "soak"),
             "effective_renderer_line": tuple_name,
             "effective_renderer_count": 1,
             "host_feature": {
                 "profile": feature_profile,
+                "requested_vulkan": expected.get("vulkan", 0),
+                "effective_vulkan": expected.get("vulkan", 0),
+                "effective_vulkan_state_count": 1,
                 "requested_vulkan_native_swapchain": feature_state,
                 "effective_vulkan_native_swapchain": feature_state,
                 "effective_state_count": 1,
                 "exact": True,
+            },
+            "process": {
+                "started": True,
+                "alive_after_probe": True,
+                "exit_code": None,
+            },
+            "startup": {
+                "failure_class": "none",
+                "evidence_count": 0,
+                "evidence_sha256": hashlib.sha256(b"").hexdigest(),
+                "vulkan_initialization_count": 0,
+                "vulkan_composition_enabled_count": 0,
+                "vulkan_composition_state_count": 0,
+                "vulkan_native_swapchain_enabled_count": 0,
+                "vulkan_native_swapchain_state_count": 0,
+                "guest_vulkan_only_enabled_count": 0,
+                "guest_vulkan_only_state_count": 0,
+                "compositor_vk_count": 0,
+                "host_compositor_error_count": 0,
             },
             "host": {
                 "runner_os": "Linux",
@@ -127,6 +151,7 @@ class EmulatorProbeReducerTest(unittest.TestCase):
                 json.dumps(result),
                 encoding="utf-8",
             )
+            (cell / "STARTUP-FAILURE-EVIDENCE.txt").write_bytes(b"")
 
     def invoke(self, root):
         assessment = root / "assessment.json"
@@ -205,8 +230,91 @@ class EmulatorProbeReducerTest(unittest.TestCase):
             result["boot_completed"] = False
             path.write_text(json.dumps(result), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "boot did not complete"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "pre-boot rejection is not allowed",
+            ):
                 self.invoke(root)
+
+    def test_valid_preboot_rejection_is_assessed_but_never_promoted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = REDUCER.VULKAN_SWAPCHAIN_EXPECTED
+            self.write_matrix(root, expected_matrix=expected)
+            for cell_id in REDUCER.VULKAN_SWAPCHAIN_PROMOTION_ORDER:
+                path = root / cell_id / "PROBE-RESULT.json"
+                result = json.loads(path.read_text(encoding="utf-8"))
+                result.update({
+                    "boot_completed": False,
+                    "environment_exact": False,
+                    "stable": False,
+                    "stage1_candidate": False,
+                    "crash_evidence_complete": False,
+                })
+                result["guest"].update({
+                    "observed_fingerprint": "",
+                    "selinux": "",
+                    "luma_sampling": "",
+                    "page_size": 0,
+                    "display_width": 0,
+                    "display_height": 0,
+                })
+                result["soak"].update({
+                    "observations": 0,
+                    "healthy_observations": 0,
+                    "initial_surfaceflinger_pid": "",
+                    "final_surfaceflinger_pid": "",
+                    "pid_changes": 0,
+                    "crash_signatures": 0,
+                    "target_crash_signatures": 0,
+                    "valid_screenshots": 0,
+                })
+                result["process"].update({
+                    "alive_after_probe": False,
+                    "exit_code": 1,
+                })
+                result["startup"].update({
+                    "failure_class": "host-compositor-init-error",
+                    "evidence_count": 8,
+                    "host_compositor_error_count": 3,
+                })
+                evidence = (
+                    b"Failed to initialize the compositor.\n"
+                    b"Failed to initialize FrameBuffer().\n"
+                    b"Could not start renderer! (Error: -2)\n"
+                    b"gfxstreamFeature:Vulkan = 0\n"
+                    b"gfxstreamFeature:VulkanNativeSwapchain = 1\n"
+                    b"extra-a\nextra-b\nextra-c\n"
+                )
+                result["startup"]["evidence_sha256"] = (
+                    hashlib.sha256(evidence).hexdigest()
+                )
+                result["failures"] = [
+                    "emulator-exited-before-adb",
+                    "adb-device-timeout",
+                ]
+                path.write_text(json.dumps(result), encoding="utf-8")
+                path.with_name(
+                    "STARTUP-FAILURE-EVIDENCE.txt"
+                ).write_bytes(evidence)
+            stale = root / "promotion.json"
+            stale.write_text("stale", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "no Stage-1 candidate in this exact",
+            ):
+                self.invoke(root)
+
+            reduced = json.loads(
+                (root / "assessment.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(stale.exists())
+            for cell_id in REDUCER.VULKAN_SWAPCHAIN_PROMOTION_ORDER:
+                self.assertEqual(
+                    reduced["cell_dispositions"][cell_id],
+                    "provenance-valid-preboot-rejection",
+                )
 
     def test_no_candidate_records_scoped_failure(self):
         with tempfile.TemporaryDirectory() as directory:
