@@ -104,7 +104,7 @@ trap cleanup EXIT
 emulator_version="$(
   "$emulator_bin" -version 2>&1 \
     | tee "$evidence/EMULATOR-VERSION.txt" \
-    | sed -n 's/^Android emulator version \([^ ]*\).*/\1/p' \
+    | sed -n 's/^.*Android emulator version \([^ ]*\).*/\1/p' \
     | head -n 1
 )"
 if [[ "$emulator_version" != "$expected_emulator_version" ]]; then

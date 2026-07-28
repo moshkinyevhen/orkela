@@ -381,12 +381,15 @@ jobs:
             "$emulator_bin" -version 2>&1 \
               || true
           )"
-          test "$(
+          printf '%s\n' "$emulator_version_output"
+          parsed_emulator_version="$(
             printf '%s\n' "$emulator_version_output" \
               | sed -n \
-                's/^Android emulator version \([^ ]*\).*/\1/p' \
+                's/^.*Android emulator version \([^ ]*\).*/\1/p' \
               | head -n 1
-          )" = "36.6.11.0"
+          )"
+          printf 'Parsed emulator version: %s\n' "$parsed_emulator_version"
+          test "$parsed_emulator_version" = "36.6.11.0"
           echo "ORKELA_EMULATOR_BIN=$emulator_bin" >> "$GITHUB_ENV"
           echo "ORKELA_EMULATOR_ARCHIVE_SHA256=$actual_archive_sha256" \
             >> "$GITHUB_ENV"
