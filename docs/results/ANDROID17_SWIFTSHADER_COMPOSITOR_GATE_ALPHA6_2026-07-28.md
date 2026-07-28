@@ -314,6 +314,46 @@ requires the linked SurfaceFlinger `F libc` PID/TID, a single-debuggerd
 `F DEBUG` tombstone, and the complete target stack. Hashing and parsing use
 the same immutable read of each raw file, preventing a hash/parse TOCTOU.
 
+### Completed same-host GuestAngle result
+
+[GitHub run 30374223297](https://github.com/moshkinyevhen/orkela/actions/runs/30374223297)
+completed successfully from source
+`5dfb64af5db86f5a838d7dfe77ea9ed373fb2dc8`. The baseline and candidate used
+the same GitHub runner, run/attempt, Ubuntu image
+`ubuntu24/20260720.247.2`, kernel `6.17.0-1020-azure`, KVM device, and kernel
+boot ID `6d57a5ff-206a-489c-9749-be8e65b737bd`. Their Android user homes,
+AVD homes, and AVD names were distinct.
+
+| Evidence | Baseline | `-GuestAngle` candidate |
+|---|---:|---:|
+| Effective `GuestVulkanOnly` | 1 | 0 |
+| Created SurfaceFlinger ANGLE VkInstances | 58 | 0 |
+| SurfaceFlinger fatal signals | 58 | 0 |
+| Complete bounded tombstones | 40 | 0 |
+| Target coherent-memory/ANGLE tombstones | 40 | 0 |
+| `sys.boot_completed` | empty | 1 |
+| `ro.boot.hardwareegl` | `angle` | empty |
+| `ro.hardware.egl` | `angle` | `emulation` |
+| Clean guest-boot predicate | false | true |
+| Cell status | `BACKEND_REACHED_ADB_GUEST_BOOT_REJECTED` | `BACKEND_REACHED_ADB_BOOT_COMPLETED` |
+
+Both cells retained effective `Vulkan=1`,
+`VulkanNativeSwapchain=1`, VkEmulation,
+`useVulkanComposition=true`, `useVulkanNativeSwapchain=true`, and
+`CompositorVk`, with no host compositor initialization error. The joint
+assessment therefore produced:
+
+```text
+GUEST_ANGLE_OFF_BOOT_RECOVERY_ON_SAME_HOST
+```
+
+The downloaded artifact was independently reprocessed locally with the same
+assessor and reproduced the joint status. This proves the bounded
+startup/backend correction on this exact Linux-hosted Emulator identity. It
+does not yet promote an APK, claim runtime soak stability, or release
+`0.3.0-alpha.6`; those remain separate cold-boot, exact-APK, playback, and
+packaging gates.
+
 The source basis for this experiment is the
 [AEMU feature catalog](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android/data/advancedFeatures.ini),
 [AEMU OpenGLES feature mapping](https://android.googlesource.com/platform/external/qemu/+/emu-master-dev/android/android-emu/android/opengles.cpp),

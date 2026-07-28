@@ -150,8 +150,8 @@ Local public-pin evidence:
   `adb_reached` from `boot_completed`, records the boot deadline, SHA-256 links
   raw logcat/getprop, parses the exact same immutable bytes it hashes, and
   independently recomputes complete tombstones.
-- The next causal Android 17 gate now runs the failing explicit-backend
-  baseline followed by
+- The causal Android 17 gate now runs the failing explicit-backend baseline
+  followed by
   `Vulkan,VulkanNativeSwapchain,-GuestAngle`. The candidate must prove
   `GuestVulkanOnly=0` while preserving VkEmulation, Vulkan composition,
   `CompositorVk`, and full guest boot; mixed or silently overridden feature
@@ -161,6 +161,15 @@ Local public-pin evidence:
   is insufficient when raw evidence still contains a SurfaceFlinger abort,
   target ANGLE/coherent-memory episode, MESA virtual-memory fatal, or final
   updatable-crashing state.
+- Same-host GitHub run
+  [`30374223297`](https://github.com/moshkinyevhen/orkela/actions/runs/30374223297)
+  proved that explicit `-GuestAngle` preserves Vulkan, the native swapchain,
+  VkEmulation, and `CompositorVk`, changes effective `GuestVulkanOnly` from
+  one to zero, and cleanly boots the pinned Android 17 guest. The baseline
+  produced 58 SurfaceFlinger fatal signals and 40 complete target tombstones;
+  the candidate produced zero SurfaceFlinger, ANGLE, or MESA fatal evidence,
+  `sys.boot_completed=1`, and `ro.hardware.egl=emulation`. This is a bounded
+  backend/startup result, not yet an APK or release promotion.
 - Android 17 16-KiB page-size validation now uses the kernel-facing
   `getconf PAGE_SIZE`; `/proc/self/smaps` remains only the API 26 fallback
   because compatibility mappings can report 4 KiB on a 16-KiB kernel.
