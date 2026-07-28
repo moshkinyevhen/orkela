@@ -159,6 +159,43 @@ if [[ "$ready" -ne 1 ]]; then
   echo "Android Emulator did not complete boot within 300 seconds" >&2
   exit 1
 fi
+
+# `sys.boot_completed=1` can precede the end of first-boot package and
+# animation work. Require several consecutive healthy service observations so
+# instrumentation never races a newly started API 37 system_server.
+stable_observations=0
+services_deadline=$((SECONDS + 90))
+while ((SECONDS < services_deadline)); do
+  package_service="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell service check package \
+      2>/dev/null \
+      | tr -d '\r' \
+      || true
+  )"
+  boot_animation="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell getprop init.svc.bootanim \
+      2>/dev/null \
+      | tr -d '\r' \
+      || true
+  )"
+  if [[ "$package_service" == *"found"* \
+      && "$boot_animation" == "stopped" ]]; then
+    stable_observations=$((stable_observations + 1))
+    if [[ "$stable_observations" -ge 5 ]]; then
+      break
+    fi
+  else
+    stable_observations=0
+  fi
+  sleep 2
+done
+if [[ "$stable_observations" -lt 5 ]]; then
+  echo "Android system services did not become stably ready" >&2
+  exit 1
+fi
+
 adb shell getprop ro.build.version.sdk | tr -d '\r' | grep -Fxq "$runtime_api"
 # Android 8 / API 26 does not ship the `getconf` shell utility. Read the
 # kernel-reported mapping page size instead; unlike a build property, this
@@ -183,10 +220,51 @@ adb shell df -k > "$evidence/DEVICE-STORAGE.txt"
 
 adb install --no-streaming -r "$app"
 adb install --no-streaming -r "$test_apk"
+adb shell pm path org.scenelith.orkela \
+  | tr -d '\r' \
+  | grep -Fq "package:"
+adb shell pm path org.scenelith.orkela.test \
+  | tr -d '\r' \
+  | grep -Fq "package:"
+sleep 5
+adb logcat -b all -d \
+  > "$evidence/logs/logcat-before-instrumentation.txt"
+
+set +e
 adb shell am instrument -w -r \
   org.scenelith.orkela.test/org.scenelith.orkela.NativeDecodeInstrumentation \
   2>&1 | tee "$evidence/logs/instrumentation.log"
-grep -Fq "INSTRUMENTATION_CODE: -1" "$evidence/logs/instrumentation.log"
+instrumentation_status="${PIPESTATUS[0]}"
+set -e
+instrumentation_ok=0
+if [[ "$instrumentation_status" -eq 0 ]] \
+    && grep -Fq "INSTRUMENTATION_CODE: -1" \
+      "$evidence/logs/instrumentation.log"; then
+  instrumentation_ok=1
+fi
+if [[ "$instrumentation_ok" -ne 1 ]]; then
+  timeout --signal=TERM --kill-after=5s 30s \
+    adb -s "$device_serial" logcat -b all -d \
+    > "$evidence/logs/logcat-after-instrumentation-failure.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 30s \
+    adb -s "$device_serial" logcat -b crash -d \
+    > "$evidence/logs/logcat-crash-buffer.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 30s \
+    adb -s "$device_serial" shell dumpsys dropbox --print system_server_crash \
+    > "$evidence/logs/dropbox-system-server-crash.txt" \
+    2>&1 \
+    || true
+  timeout --signal=TERM --kill-after=5s 30s \
+    adb -s "$device_serial" shell dumpsys dropbox --print system_app_crash \
+    > "$evidence/logs/dropbox-system-app-crash.txt" \
+    2>&1 \
+    || true
+  exit 1
+fi
 adb exec-out run-as org.scenelith.orkela \
   cat files/orkela-ci-smoke.json \
   > "$evidence/orkela-ci-smoke.json"
