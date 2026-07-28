@@ -85,11 +85,12 @@ class PackagingContractTest(unittest.TestCase):
             ROOT / "tools/release/bootstrap_nsis.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "3bc2b06253a7e4957111be152ac6a536e0c7478a706e19da814038db5d706495",
+            "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f",
             bootstrap,
         )
         self.assertIn("downloads.sourceforge.net/project/nsis/", bootstrap)
-        self.assertNotIn("nsis-$version-setup.exe/download", bootstrap)
+        self.assertIn("nsis-$version.zip", bootstrap)
+        self.assertNotIn("nsis-$version.zip/download", bootstrap)
         self.assertIn("--retry-all-errors", bootstrap)
 
 
