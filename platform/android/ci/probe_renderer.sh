@@ -16,7 +16,7 @@ esac
 
 system_image="system-images;android-37.0;google_apis;x86_64"
 expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
-expected_emulator_version="36.6.11"
+expected_emulator_version="36.6.11.0"
 emulator_bin="${ORKELA_EMULATOR_BIN:-$ANDROID_HOME/emulator/emulator}"
 emulator_console_port=5554
 device_serial="emulator-$emulator_console_port"

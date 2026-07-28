@@ -382,7 +382,7 @@ jobs:
               | sed -n \
                 's/^Android emulator version \([^ ]*\).*/\1/p' \
               | head -n 1
-          )" = "36.6.11"
+          )" = "36.6.11.0"
           echo "ORKELA_EMULATOR_BIN=$emulator_bin" >> "$GITHUB_ENV"
           echo "ORKELA_EMULATOR_ARCHIVE_SHA256=$actual_archive_sha256" \
             >> "$GITHUB_ENV"
