@@ -491,9 +491,9 @@ struct resonith_pull_decoder::implementation {
 };
 
 resonith_pull_decoder::resonith_pull_decoder(
-    std::unique_ptr<implementation> implementation
+    std::unique_ptr<implementation> state
 ) noexcept
-    : implementation_(std::move(implementation)) {}
+    : implementation_(std::move(state)) {}
 
 resonith_pull_decoder::resonith_pull_decoder(
     resonith_pull_decoder&&

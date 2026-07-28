@@ -684,10 +684,10 @@ bool load_file(app_state* state, const std::filesystem::path& path) {
         return false;
     }
     std::ifstream input(path, std::ios::binary);
-    std::vector<std::uint8_t> bytes(
-        std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>()
-    );
+    std::vector<std::uint8_t> bytes{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{},
+    };
     auto decoded = std::make_shared<orkela::decoded_audio>();
     std::string error;
     if (

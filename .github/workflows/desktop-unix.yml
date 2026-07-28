@@ -187,6 +187,7 @@ jobs:
           usesh: true
           prepare: |
             pkg install -y \
+              bzip2 \
               cmake \
               git \
               gmake \
@@ -302,7 +303,7 @@ jobs:
             "out/Orkela-macOS-${{ matrix.arch }}-$version.pkg"
           pkgutil --payload-files \
             "out/Orkela-macOS-${{ matrix.arch }}-$version.pkg" \
-            | grep -Fq "Orkela.app/Contents/MacOS/Orkela"
+            | grep -F "Orkela.app/Contents/MacOS/Orkela" > /dev/null
           shasum -a 256 "out/Orkela-macOS-${{ matrix.arch }}.zip" \
             > "out/Orkela-macOS-${{ matrix.arch }}.sha256"
           shasum -a 256 \

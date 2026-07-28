@@ -135,11 +135,14 @@ jobs:
           )
           for abi in arm64-v8a x86_64; do
             member="lib/$abi/liborkela_android.so"
-            unzip -l "$app" "$member" | grep -Fq "$member"
+            unzip -l "$app" "$member" \
+              | grep -F "$member" > /dev/null
             unzip -p "$app" "$member" > "$evidence/elf/liborkela_android-$abi.so"
-            "$ndk_bin/llvm-readelf" -h "$evidence/elf/liborkela_android-$abi.so" \
-              | grep -F "Machine:" \
-              | grep -Fq "${machines[$abi]}"
+            "$ndk_bin/llvm-readelf" -h \
+              "$evidence/elf/liborkela_android-$abi.so" \
+              > "$evidence/elf/ELF-HEADER-$abi.txt"
+            grep -F "Machine:" "$evidence/elf/ELF-HEADER-$abi.txt" \
+              | grep -F "${machines[$abi]}" > /dev/null
             "$ndk_bin/llvm-readelf" -l \
               "$evidence/elf/liborkela_android-$abi.so" \
               > "$evidence/elf/PROGRAM-HEADERS-$abi.txt"
@@ -149,11 +152,13 @@ jobs:
             ' "$evidence/elf/PROGRAM-HEADERS-$abi.txt"
             "$ndk_bin/llvm-nm" -D --defined-only \
               "$evidence/elf/liborkela_android-$abi.so" \
-              | grep -Fq \
-                "Java_org_scenelith_orkela_MainActivity_nativeOpen"
+              > "$evidence/elf/EXPORTED-SYMBOLS-$abi.txt"
+            grep -F \
+              "Java_org_scenelith_orkela_MainActivity_nativeOpen" \
+              "$evidence/elf/EXPORTED-SYMBOLS-$abi.txt" > /dev/null
           done
           unzip -l "$app" "assets/emotional-piano.resonith" \
-            | grep -Fq "assets/emotional-piano.resonith"
+            | grep -F "assets/emotional-piano.resonith" > /dev/null
           actual_stream="$(
             unzip -p "$app" assets/emotional-piano.resonith \
               | sha256sum \
