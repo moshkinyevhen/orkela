@@ -12,18 +12,21 @@ case "$gate" in
     runtime_api=26
     expected_page_size=4096
     system_image="system-images;android-26;google_apis;x86_64"
+    expected_fingerprint=""
     emulator_console_port=5554
     ;;
   37)
     runtime_api=37
     expected_page_size=4096
     system_image="system-images;android-37.0;google_apis;x86_64"
+    expected_fingerprint="google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys"
     emulator_console_port=5556
     ;;
   37-16k)
     runtime_api=37
     expected_page_size=16384
     system_image="system-images;android-37.0;google_apis_ps16k;x86_64"
+    expected_fingerprint="google/sdk_gphone16k_x86_64/emu64xa16k:17/CE2A.260420.019/15611780:userdebug/dev-keys"
     emulator_console_port=5558
     ;;
   *)
@@ -135,6 +138,144 @@ if [[ "$device_seen" -ne 1 ]]; then
 fi
 export ANDROID_SERIAL="$device_serial"
 
+# Android 17 build CE2A.260420.019 has a host/guest mapper mismatch in the
+# emulator's system RegionSampling path. On Linux it can abort SurfaceFlinger
+# before app instrumentation starts. Restrict the workaround to the exact two
+# audited userdebug fingerprints, disable only luma-region sampling, restart
+# SurfaceFlinger so it reads the property, then return ADB to an unprivileged
+# shell before any Orkela APK is installed. Rendering, screenshots, UIAutomator,
+# AudioTrack, native decode and the exact PCM gate remain enabled.
+compositor_workaround="none"
+stock_compositor_configuration=true
+surfaceflinger_crash_signatures_before=0
+observed_fingerprint=""
+if [[ "$runtime_api" -eq 37 ]]; then
+  observed_fingerprint="$(
+    adb shell getprop ro.build.fingerprint | tr -d '\r'
+  )"
+  build_id="$(adb shell getprop ro.build.id | tr -d '\r')"
+  debuggable="$(adb shell getprop ro.debuggable | tr -d '\r')"
+  selinux_before="$(adb shell getenforce | tr -d '\r')"
+  renderer_egl="$(adb shell getprop ro.hardware.egl | tr -d '\r')"
+  renderer_transport="$(
+    adb shell getprop ro.boot.qemu.gltransport.name | tr -d '\r'
+  )"
+  test "$observed_fingerprint" = "$expected_fingerprint"
+  test "$build_id" = "CE2A.260420.019"
+  test "$debuggable" = "1"
+  test "$selinux_before" = "Enforcing"
+
+  adb logcat -b crash -d \
+    > "$evidence/logs/logcat-crash-before-surfaceflinger-stabilization.txt"
+  surfaceflinger_crash_signatures_before="$(
+    grep -Eic \
+      "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling" \
+      "$evidence/logs/logcat-crash-before-surfaceflinger-stabilization.txt" \
+      || true
+  )"
+
+  timeout --signal=TERM --kill-after=5s 30s adb root
+  adb_root_ready=0
+  root_deadline=$((SECONDS + 60))
+  while ((SECONDS < root_deadline)); do
+    if [[ "$(
+        timeout --signal=TERM --kill-after=5s 10s \
+          adb -s "$device_serial" shell id -u 2>/dev/null \
+          | tr -d '\r' \
+          || true
+      )" == "0" ]]; then
+      adb_root_ready=1
+      break
+    fi
+    sleep 1
+  done
+  test "$adb_root_ready" -eq 1
+
+  surfaceflinger_pid_before=""
+  surfaceflinger_deadline=$((SECONDS + 60))
+  while ((SECONDS < surfaceflinger_deadline)); do
+    surfaceflinger_pid_before="$(
+      adb shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true
+    )"
+    if [[ -n "$surfaceflinger_pid_before" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  test -n "$surfaceflinger_pid_before"
+
+  adb shell setprop debug.sf.luma_sampling 0
+  test "$(
+      adb shell getprop debug.sf.luma_sampling | tr -d '\r'
+    )" = "0"
+  adb shell setprop ctl.restart surfaceflinger
+
+  surfaceflinger_pid_after=""
+  surfaceflinger_restarted=0
+  surfaceflinger_deadline=$((SECONDS + 90))
+  while ((SECONDS < surfaceflinger_deadline)); do
+    surfaceflinger_pid_after="$(
+      adb shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true
+    )"
+    surfaceflinger_state="$(
+      adb shell getprop init.svc.surfaceflinger 2>/dev/null \
+        | tr -d '\r' \
+        || true
+    )"
+    surfaceflinger_service="$(
+      adb shell service check SurfaceFlinger 2>/dev/null \
+        | tr -d '\r' \
+        || true
+    )"
+    if [[ -n "$surfaceflinger_pid_after" \
+        && "$surfaceflinger_pid_after" != "$surfaceflinger_pid_before" \
+        && "$surfaceflinger_state" = "running" \
+        && "$surfaceflinger_service" = *"found"* ]]; then
+      surfaceflinger_restarted=1
+      break
+    fi
+    sleep 1
+  done
+  test "$surfaceflinger_restarted" -eq 1
+
+  timeout --signal=TERM --kill-after=5s 30s adb unroot
+  adb_shell_ready=0
+  shell_deadline=$((SECONDS + 60))
+  while ((SECONDS < shell_deadline)); do
+    shell_uid="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell id -u 2>/dev/null \
+        | tr -d '\r' \
+        || true
+    )"
+    if [[ "$shell_uid" = "2000" ]]; then
+      adb_shell_ready=1
+      break
+    fi
+    sleep 1
+  done
+  test "$adb_shell_ready" -eq 1
+  test "$(adb shell getenforce | tr -d '\r')" = "Enforcing"
+  test "$(
+      adb shell getprop debug.sf.luma_sampling | tr -d '\r'
+    )" = "0"
+
+  {
+    echo "fingerprint=$observed_fingerprint"
+    echo "build_id=$build_id"
+    echo "selinux_before=$selinux_before"
+    echo "renderer_egl=$renderer_egl"
+    echo "renderer_transport=$renderer_transport"
+    echo "surfaceflinger_pid_before=$surfaceflinger_pid_before"
+    echo "surfaceflinger_pid_after=$surfaceflinger_pid_after"
+    echo "luma_sampling=0"
+    echo "post_workaround_adb_uid=$shell_uid"
+    echo "post_workaround_selinux=Enforcing"
+  } > "$evidence/SURFACEFLINGER-STABILIZATION.txt"
+  compositor_workaround="disable-region-luma-sampling-and-restart-surfaceflinger"
+  stock_compositor_configuration=false
+fi
+
 ready=0
 boot_deadline=$((SECONDS + 285))
 while ((SECONDS < boot_deadline)); do
@@ -180,12 +321,44 @@ while ((SECONDS < services_deadline)); do
       | tr -d '\r' \
       || true
   )"
+  surfaceflinger_service="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell service check SurfaceFlinger \
+      2>/dev/null \
+      | tr -d '\r' \
+      || true
+  )"
+  mount_service="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb -s "$device_serial" shell service check mount \
+      2>/dev/null \
+      | tr -d '\r' \
+      || true
+  )"
   boot_animation_ready=0
   if [[ -z "$boot_animation" || "$boot_animation" == "stopped" ]]; then
     boot_animation_ready=1
   fi
+  storage_ready=1
+  if [[ "$runtime_api" -ge 37 ]]; then
+    storage_volumes="$(
+      timeout --signal=TERM --kill-after=5s 10s \
+        adb -s "$device_serial" shell sm list-volumes all \
+        2>/dev/null \
+        | tr -d '\r' \
+        || true
+    )"
+    storage_ready=0
+    if grep -Eq "^private mounted" <<< "$storage_volumes" \
+        && grep -Eq "^emulated;0 mounted" <<< "$storage_volumes"; then
+      storage_ready=1
+    fi
+  fi
   if [[ "$package_service" == *"found"* \
-      && "$boot_animation_ready" -eq 1 ]]; then
+      && "$surfaceflinger_service" == *"found"* \
+      && "$mount_service" == *"found"* \
+      && "$boot_animation_ready" -eq 1 \
+      && "$storage_ready" -eq 1 ]]; then
     stable_observations=$((stable_observations + 1))
     if [[ "$stable_observations" -ge 5 ]]; then
       break
@@ -201,23 +374,35 @@ if [[ "$stable_observations" -lt 5 ]]; then
 fi
 
 adb shell getprop ro.build.version.sdk | tr -d '\r' | grep -Fxq "$runtime_api"
-# Android 8 / API 26 does not ship the `getconf` shell utility. Read the
-# kernel-reported mapping page size instead; unlike a build property, this
-# measures the runtime that is actually executing the APK gate.
-actual_page_kib="$(
-  adb shell cat /proc/self/smaps \
-    | tr -d '\r' \
-    | awk '
-        $1 == "KernelPageSize:" && $3 == "kB" {
-          value = $2
-        }
-        END {
-          print value
-        }
-      '
-)"
-test -n "$actual_page_kib"
-actual_page_size="$((actual_page_kib * 1024))"
+if [[ -z "$observed_fingerprint" ]]; then
+  observed_fingerprint="$(
+    adb shell getprop ro.build.fingerprint | tr -d '\r'
+  )"
+fi
+# API 26 lacks getconf. Newer runtimes expose the kernel page size directly;
+# this is essential for the Android 17 16-KiB gate because /proc/self/smaps can
+# describe a 4-KiB compatibility mapping even on a 16-KiB kernel.
+if [[ "$runtime_api" -ge 37 ]]; then
+  actual_page_size="$(
+    adb shell getconf PAGE_SIZE | tr -d '\r'
+  )"
+else
+  actual_page_kib="$(
+    adb shell cat /proc/self/smaps \
+      | tr -d '\r' \
+      | awk '
+          $1 == "KernelPageSize:" && $3 == "kB" {
+            value = $2
+          }
+          END {
+            print value
+          }
+        '
+  )"
+  test -n "$actual_page_kib"
+  actual_page_size="$((actual_page_kib * 1024))"
+fi
+test -n "$actual_page_size"
 test "$actual_page_size" -eq "$expected_page_size"
 adb shell getprop > "$evidence/DEVICE-PROPERTIES.txt"
 adb shell df -k > "$evidence/DEVICE-STORAGE.txt"
@@ -394,6 +579,25 @@ diff -u \
   "$evidence/EXPECTED-APP-DATA-FILES.txt" \
   "$evidence/APP-DATA-FILES.txt"
 
+timeout --signal=TERM --kill-after=5s 30s adb logcat -b crash -d \
+  > "$evidence/logs/logcat-crash-after-gate.txt"
+surfaceflinger_crash_signatures_after="$(
+  grep -Eic \
+    "GoldfishMapper::readFromHost|hasReadColorBufferDma|RegionSampling" \
+    "$evidence/logs/logcat-crash-after-gate.txt" \
+    || true
+)"
+if [[ "$runtime_api" -eq 37 ]]; then
+  surfaceflinger_pid_final="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+      adb shell pidof surfaceflinger \
+      | tr -d '\r'
+  )"
+  test "$surfaceflinger_pid_final" = "$surfaceflinger_pid_after"
+  test "$surfaceflinger_crash_signatures_after" \
+    -le "$surfaceflinger_crash_signatures_before"
+fi
+
 jq -n \
   --argjson runtime_api "$runtime_api" \
   --argjson page_size "$actual_page_size" \
@@ -401,6 +605,14 @@ jq -n \
   --arg expected_pcm16_sha256 "$expected_pcm" \
   --arg app_sha256 "$app_sha256" \
   --arg test_apk_sha256 "$test_apk_sha256" \
+  --arg system_fingerprint "$observed_fingerprint" \
+  --arg compositor_workaround "$compositor_workaround" \
+  --argjson stock_compositor_configuration \
+    "$stock_compositor_configuration" \
+  --argjson surfaceflinger_crash_signatures_before \
+    "$surfaceflinger_crash_signatures_before" \
+  --argjson surfaceflinger_crash_signatures_after \
+    "$surfaceflinger_crash_signatures_after" \
   '{
     schema: 1,
     runtime_api: $runtime_api,
@@ -410,5 +622,12 @@ jq -n \
     test_apk_sha256: $test_apk_sha256,
     native_decode: "pass",
     expected_pcm16_sha256: $expected_pcm16_sha256,
+    system_fingerprint: $system_fingerprint,
+    compositor_workaround: $compositor_workaround,
+    stock_compositor_configuration: $stock_compositor_configuration,
+    surfaceflinger_crash_signatures_before:
+      $surfaceflinger_crash_signatures_before,
+    surfaceflinger_crash_signatures_after:
+      $surfaceflinger_crash_signatures_after,
     audibility_claim: false
   }' > "$evidence/RUNTIME-GATE.json"
